@@ -58,4 +58,13 @@ install -d -m 755 "$(dirname "$INSTALL_PATH")" >/dev/null 2>&1 || true
 install -m 755 "$TMPFILE" "$INSTALL_PATH" || die "Install failed: $INSTALL_PATH"
 
 echo -e "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
-exec "$INSTALL_PATH" --install
+
+if [ -t 0 ]; then
+  exec "$INSTALL_PATH" --install
+fi
+
+if [ -r /dev/tty ]; then
+  exec </dev/tty >/dev/tty 2>&1 "$INSTALL_PATH" --install
+fi
+
+die "No TTY available. Run: sudo $INSTALL_PATH --install"
