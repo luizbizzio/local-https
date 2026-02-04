@@ -18,7 +18,7 @@ INSTALL_PATH="${LOCAL_HTTPS_INSTALL_PATH:-/usr/local/sbin/local-https}"
 SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/luizbizzio/local-https/main/local-https.sh"
 SCRIPT_URL="${LOCAL_HTTPS_SOURCE_URL:-$SCRIPT_URL_DEFAULT}"
 
-EXPECTED_SHA256="b6e8ba5faaaa8451896439566a0d4cdf7bb0268cc03bc7e54c800e2ae62cb36"
+EXPECTED_SHA256="b6e8ba5faaaa8451896439566a0d4cdf7bb0268cc03bc7e54c800e2ae62cb3"
 
 TMP="$(mktemp)"
 chmod 700 "$TMP" >/dev/null 2>&1 || true
