@@ -3,17 +3,13 @@ set -euo pipefail
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/luizbizzio/local-https/main/local-https.sh"
-SCRIPT_URL="${LOCAL_HTTPS_SOURCE_URL:-$SCRIPT_URL_DEFAULT}"
+SCRIPT_URL="https://raw.githubusercontent.com/luizbizzio/local-https/main/local-https.sh"
+INSTALL_PATH="/usr/local/sbin/local-https"
 
-INSTALL_PATH="${LOCAL_HTTPS_INSTALL_PATH:-/usr/local/sbin/local-https}"
-
-EXPECTED_SHA256="PUT_SHA256_HERE"
+EXPECTED_SHA256="4f3a0b3f15871383d30d3e8df4a9316f92e5eedb99af46dbd712c57cb9d5c59e"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 die() { echo -e "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
-
-[ "${EXPECTED_SHA256}" != "PUT_SHA256_HERE" ] || die "Replace PUT_SHA256_HERE with the real sha256"
 
 if [ "$(id -u)" -ne 0 ]; then
   die "Run as root. Example: curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install.sh | sudo bash"
