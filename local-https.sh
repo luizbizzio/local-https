@@ -5,16 +5,23 @@ set -o pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 STEP_DELAY="${STEP_DELAY:-1.0}"
-NONINTERACTIVE=0
-VERBOSE=0
 
-[ "${LOCAL_HTTPS_NONINTERACTIVE:-0}" = "1" ] && NONINTERACTIVE=1
-[ "${LOCAL_HTTPS_VERBOSE:-0}" = "1" ] && VERBOSE=1
+NONINTERACTIVE="${LOCAL_HTTPS_NONINTERACTIVE:-0}"
+VERBOSE="${LOCAL_HTTPS_VERBOSE:-0}"
+BOOTSTRAP="${LOCAL_HTTPS_BOOTSTRAP:-0}"
 
-pause_step() { [ "$NONINTERACTIVE" -eq 1 ] && return 0; sleep "$STEP_DELAY"; }
+case "$NONINTERACTIVE" in 1|true|TRUE|yes|YES) NONINTERACTIVE=1 ;; *) NONINTERACTIVE=0 ;; esac
+case "$VERBOSE" in 1|true|TRUE|yes|YES) VERBOSE=1 ;; *) VERBOSE=0 ;; esac
+case "$BOOTSTRAP" in 1|true|TRUE|yes|YES) BOOTSTRAP=1 ;; *) BOOTSTRAP=0 ;; esac
+
+[ ! -t 0 ] && NONINTERACTIVE=1
+[ "$BOOTSTRAP" -eq 1 ] && NONINTERACTIVE=1
+
+pause_step() { [ "$NONINTERACTIVE" -eq 1 ] && return 0; [ ! -t 1 ] && return 0; sleep "$STEP_DELAY"; }
 
 out() { echo -e "$1"; pause_step; }
-die() { echo -e "\033[31m[ERROR]\033[0m $1"; exit 1; }
+vout() { [ "$VERBOSE" -eq 1 ] && out "$1" || true; }
+die() { echo -e "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
 
 SCRIPT_CMD_NAME="local-https"
 INSTALL_PATH="/usr/local/sbin/local-https"
@@ -309,6 +316,7 @@ print_help() {
   echo "  $SCRIPT_CMD_NAME --check"
   echo "  $SCRIPT_CMD_NAME --status"
   echo "  $SCRIPT_CMD_NAME --print-ca"
+  echo "  $SCRIPT_CMD_NAME --configure"
   echo "  $SCRIPT_CMD_NAME --uninstall [--yes] [--purge-certs]"
   echo ""
   echo "Notes:"
@@ -319,6 +327,14 @@ print_help() {
 }
 
 banner() {
+  if [ "$BOOTSTRAP" -eq 1 ]; then
+    echo -e "\033[36m============================================================\033[0m"
+    echo -e "\033[1m\033[36m local-https\033[0m \033[90m(install)\033[0m"
+    echo -e "\033[36m============================================================\033[0m"
+    echo ""
+    return 0
+  fi
+
   echo -e "\033[36m============================================================\033[0m"
   echo -e "\033[1m\033[36m Local HTTPS Certificate Manager\033[0m \033[90m(local CA + renew + deploy)\033[0m"
   echo -e "\033[36m============================================================\033[0m"
@@ -326,14 +342,16 @@ banner() {
   echo -e "\033[1mCommands\033[0m"
   echo -e "  - $SCRIPT_CMD_NAME --install"
   echo -e "  - $SCRIPT_CMD_NAME --renew [--force-renew] [--no-tech-restart]"
+  echo -e "  - $SCRIPT_CMD_NAME --configure"
   echo -e "  - $SCRIPT_CMD_NAME --check | --status | --print-ca | --uninstall"
   echo ""
 }
 
 confirm_start() {
-  if [ "$NONINTERACTIVE" -eq 1 ] || [ ! -t 0 ]; then
-    return 0
-  fi
+  [ "$BOOTSTRAP" -eq 1 ] && return 0
+  [ "$NONINTERACTIVE" -eq 1 ] && return 0
+  [ -t 0 ] || return 0
+
   if prompt_yn "Continue? (y/N): " "N"; then
     return 0
   fi
@@ -411,7 +429,7 @@ install_self() {
   out "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
 
   if [ "${LOCAL_HTTPS_BOOTSTRAP:-0}" != "1" ]; then
-    exec env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
+    exec env LOCAL_HTTPS_BOOTSTRAP=1 LOCAL_HTTPS_NONINTERACTIVE=1 "$INSTALL_PATH" --install
   fi
 }
 
@@ -447,9 +465,9 @@ detect_pihole_and_technitium() {
 
   detect_technitium_service_name
   if [ -n "$TECH_SERVICE" ]; then
-    out "\033[32m[OK]\033[0m Technitium service detected: $TECH_SERVICE"
+    vout "\033[32m[OK]\033[0m Technitium service detected: $TECH_SERVICE"
   else
-    out "\033[33m[INFO]\033[0m Technitium service name not detected."
+    vout "\033[33m[INFO]\033[0m Technitium service name not detected."
   fi
 }
 
@@ -473,32 +491,33 @@ read_host_identity() {
   done
   FILTERED_IPS="$(echo "$FILTERED_IPS" | xargs || true)"
 
+  local ip_count=0
+  local first_ip=""
+  for IP in $FILTERED_IPS; do
+    ip_count=$((ip_count + 1))
+    [ -z "$first_ip" ] && first_ip="$IP"
+  done
+
   out "\033[34m[INFO]\033[0m Hostname: $HOSTNAME"
-  out "\033[34m[INFO]\033[0m IPs (raw): ${ALL_IPS:-none}"
-  out "\033[34m[INFO]\033[0m IPs (SAN): ${FILTERED_IPS:-none}"
+  out "\033[34m[INFO]\033[0m SAN IPs: ${ip_count:-0} (example: ${first_ip:-none})"
+  vout "\033[34m[INFO]\033[0m IPs (raw): ${ALL_IPS:-none}"
+  vout "\033[34m[INFO]\033[0m IPs (SAN full): ${FILTERED_IPS:-none}"
 
   TAILSCALE_DNS=""
   TAILSCALE_SHORT=""
 
-  if command -v tailscale >/dev/null 2>&1; then
-    out "\033[34m[INFO]\033[0m Tailscale detected, reading DNS name..."
-    if command -v jq >/dev/null 2>&1; then
-      TAILSCALE_DNS="$(tailscale status -json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//' || true)"
-    else
-      TAILSCALE_DNS=""
-    fi
-
+  if command -v tailscale >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    TAILSCALE_DNS="$(tailscale status -json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//' || true)"
     if [ -n "$TAILSCALE_DNS" ] && [ "$TAILSCALE_DNS" != "null" ]; then
       TAILSCALE_SHORT="${TAILSCALE_DNS%%.*}"
       out "\033[32m[OK]\033[0m Tailscale DNS: $TAILSCALE_DNS"
-      out "\033[32m[OK]\033[0m Tailscale short name: $TAILSCALE_SHORT"
     else
       TAILSCALE_DNS=""
       TAILSCALE_SHORT=""
-      out "\033[33m[WARN]\033[0m Tailscale present but DNSName not available (jq missing or DNSName empty)."
+      vout "\033[33m[INFO]\033[0m Tailscale present but DNSName not available."
     fi
   else
-    out "\033[33m[INFO]\033[0m Tailscale not installed. Skipping."
+    vout "\033[33m[INFO]\033[0m Tailscale not installed or jq missing."
   fi
 }
 
@@ -777,17 +796,18 @@ apply_pihole_tls_install() {
     return 0
   fi
 
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+    out "\033[34m[INFO]\033[0m Pi-hole detected. Skipping auto config. Run: $SCRIPT_CMD_NAME --configure"
+    return 0
+  fi
+
   local stack=""
   stack="$(detect_pihole_stack)"
   local preferred=""
   preferred="$(choose_preferred_dns)"
 
-  echo ""
-  out "\033[34m[INFO]\033[0m Pi-hole detected."
-  out "\033[34m[INFO]\033[0m Web stack: $stack"
-  out "\033[34m[INFO]\033[0m Certificate file: $SERVER_PEM"
-  out "\033[34m[INFO]\033[0m Redirect host: $preferred"
-  echo ""
+  out "\033[34m[INFO]\033[0m Pi-hole: stack=$stack host=$preferred"
+  vout "\033[34m[INFO]\033[0m Certificate file: $SERVER_PEM"
 
   if ! prompt_yn_loop "Apply HTTPS to Pi-hole now? (y/N): " "N"; then
     out "\033[33m[INFO]\033[0m Skipping Pi-hole deploy."
@@ -844,7 +864,6 @@ EOF
     fi
 
     rm -f "$backup" >/dev/null 2>&1 || true
-
     out "\033[32m[OK]\033[0m Open: https://$preferred/admin"
     return 0
   fi
@@ -931,6 +950,11 @@ configure_technitium_optional_install() {
 
   if [ "$TECH_PRESENT" -eq 0 ]; then
     out "\033[33m[INFO]\033[0m Technitium not detected or not reachable. Skipping."
+    return 0
+  fi
+
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+    out "\033[34m[INFO]\033[0m Technitium detected. Skipping TLS API config. Run: $SCRIPT_CMD_NAME --configure"
     return 0
   fi
 
@@ -1122,7 +1146,23 @@ install_cron_job() {
 }
 
 enable_autorenew_menu_install() {
-  out "\033[36m[STAGE 10/11]\033[0m Auto renew (strongly recommended)"
+  out "\033[36m[STAGE 10/11]\033[0m Auto renew"
+
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+    if has_systemctl; then
+      AUTORENEW_METHOD="systemd"
+      if install_systemd_timer; then
+        out "\033[32m[OK]\033[0m Enabled systemd timer: local-https-renew.timer"
+        return 0
+      fi
+    fi
+
+    AUTORENEW_METHOD="cron"
+    install_cron_job
+    out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00)."
+    return 0
+  fi
+
   echo ""
   echo "Your server certificate expires every 40 days."
   echo "Auto renew keeps HTTPS stable."
@@ -1138,11 +1178,7 @@ enable_autorenew_menu_install() {
   echo "2) cron (fallback)"
   echo "3) skip (not recommended)"
   local RSEL=""
-  if [ "$NONINTERACTIVE" -eq 1 ]; then
-    RSEL="1"
-  else
-    read -r -p "Choose (1-3): " RSEL
-  fi
+  read -r -p "Choose (1-3): " RSEL
   pause_step
 
   case "$RSEL" in
@@ -1152,11 +1188,7 @@ enable_autorenew_menu_install() {
 
   if [ "$RSEL" = "3" ]; then
     local CONF=""
-    if [ "$NONINTERACTIVE" -eq 1 ]; then
-      CONF="SKIP"
-    else
-      read -r -p "Skip auto renew? Type SKIP to confirm: " CONF
-    fi
+    read -r -p "Skip auto renew? Type SKIP to confirm: " CONF
     [ "$CONF" = "SKIP" ] || RSEL="1"
     pause_step
   fi
@@ -1208,6 +1240,12 @@ final_export_install() {
   echo "  - Server key:             $SERVER_KEY"
   [ -f "$SERVER_PFX" ] && echo "  - Server PFX:             $SERVER_PFX"
   echo ""
+
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+    out "\033[34m[INFO]\033[0m To print Root CA PEM: $SCRIPT_CMD_NAME --print-ca"
+    return 0
+  fi
+
   pause_step
 
   out "\033[34m[INFO]\033[0m Root CA SHA-256 fingerprint:"
@@ -1228,6 +1266,14 @@ final_export_install() {
 }
 
 final_device_guide_install() {
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ] || [ ! -t 0 ]; then
+    return 0
+  fi
+
+  if ! prompt_yn_loop "Show device install guide? (y/N): " "N"; then
+    return 0
+  fi
+
   echo ""
   echo -e "\033[36m==================== Device install guide ====================\033[0m"
   echo -e "\033[90mGoal:\033[0m Install \033[1mrootCA.crt\033[0m as a \033[1mTrusted Root CA\033[0m on your devices."
@@ -1408,6 +1454,8 @@ check_only() {
 
 renew_flow() {
   NONINTERACTIVE=1
+  BOOTSTRAP=0
+
   require_installed
   require_root
   ensure_runtime_deps
@@ -1490,6 +1538,35 @@ renew_flow() {
   exit 0
 }
 
+configure_flow() {
+  require_installed
+  require_root
+  ensure_runtime_deps
+
+  BOOTSTRAP=0
+
+  banner
+  confirm_start
+  pause_step
+
+  detect_pihole_and_technitium
+  read_host_identity
+  prepare_dir
+
+  [ -f "$CA_CRT" ] && [ -f "$CA_KEY" ] || create_or_reuse_ca
+  [ -f "$SERVER_CRT" ] || FORCE_RENEW=1
+  issue_or_renew_server_cert
+
+  apply_permissions
+  apply_pihole_tls_install
+  configure_technitium_optional_install
+  final_export_install
+  final_device_guide_install
+
+  write_state
+  out "\033[32m[OK]\033[0m Configure completed."
+}
+
 install_flow() {
   require_root
 
@@ -1503,6 +1580,7 @@ install_flow() {
       echo "Use:"
       echo "  $SCRIPT_CMD_NAME --renew"
       echo "  $SCRIPT_CMD_NAME --status"
+      echo "  $SCRIPT_CMD_NAME --configure"
       echo "Reinstall only via:"
       echo "  $SCRIPT_CMD_NAME --uninstall --yes --purge-certs"
       echo "  $SCRIPT_CMD_NAME --install"
@@ -1536,7 +1614,6 @@ install_flow() {
   final_device_guide_install
 
   write_state
-
   out "\033[32m[OK]\033[0m Done."
 }
 
@@ -1578,6 +1655,11 @@ parse_cli() {
     --print-ca)
       shift
       print_ca
+      ;;
+    --configure)
+      shift
+      configure_flow
+      exit 0
       ;;
     --uninstall)
       shift
