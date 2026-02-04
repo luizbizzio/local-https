@@ -6,6 +6,10 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 STEP_DELAY="${STEP_DELAY:-1.0}"
 NONINTERACTIVE=0
+VERBOSE=0
+
+[ "${LOCAL_HTTPS_NONINTERACTIVE:-0}" = "1" ] && NONINTERACTIVE=1
+[ "${LOCAL_HTTPS_VERBOSE:-0}" = "1" ] && VERBOSE=1
 
 pause_step() { [ "$NONINTERACTIVE" -eq 1 ] && return 0; sleep "$STEP_DELAY"; }
 
@@ -304,6 +308,7 @@ print_help() {
   echo "  $SCRIPT_CMD_NAME --renew [--force-renew] [--no-tech-restart]"
   echo "  $SCRIPT_CMD_NAME --check"
   echo "  $SCRIPT_CMD_NAME --status"
+  echo "  $SCRIPT_CMD_NAME --print-ca"
   echo "  $SCRIPT_CMD_NAME --uninstall [--yes] [--purge-certs]"
   echo ""
   echo "Notes:"
@@ -321,11 +326,14 @@ banner() {
   echo -e "\033[1mCommands\033[0m"
   echo -e "  - $SCRIPT_CMD_NAME --install"
   echo -e "  - $SCRIPT_CMD_NAME --renew [--force-renew] [--no-tech-restart]"
-  echo -e "  - $SCRIPT_CMD_NAME --check | --status | --uninstall"
+  echo -e "  - $SCRIPT_CMD_NAME --check | --status | --print-ca | --uninstall"
   echo ""
 }
 
 confirm_start() {
+  if [ "$NONINTERACTIVE" -eq 1 ] || [ ! -t 0 ]; then
+    return 0
+  fi
   if prompt_yn "Continue? (y/N): " "N"; then
     return 0
   fi
@@ -629,9 +637,28 @@ EOF
     out "\033[32m[OK]\033[0m Server certificate still valid. No renewal needed."
   fi
 
-  out "\033[34m[INFO]\033[0m Certificate SANs:"
-  openssl x509 -in "$SERVER_CRT" -noout -ext subjectAltName 2>/dev/null || true
-  pause_step
+  if [ "$VERBOSE" -eq 1 ]; then
+    out "\033[34m[INFO]\033[0m Certificate SANs:"
+    openssl x509 -in "$SERVER_CRT" -noout -ext subjectAltName 2>/dev/null || true
+    pause_step
+  else
+    local ip_count=0
+    local _ip=""
+    for _ip in $FILTERED_IPS; do ip_count=$((ip_count + 1)); done
+
+    local dns_list="$HOSTNAME"
+    if [ "$PIHOLE_PRESENT" -eq 1 ]; then
+      dns_list="$dns_list, pi.hole"
+    fi
+    if [ -n "$TAILSCALE_DNS" ] && [ "$TAILSCALE_DNS" != "null" ]; then
+      dns_list="$dns_list, $TAILSCALE_DNS"
+    fi
+    if [ -n "$TAILSCALE_SHORT" ] && [ "$TAILSCALE_SHORT" != "$HOSTNAME" ] && [ "$TAILSCALE_SHORT" != "pi" ]; then
+      dns_list="$dns_list, $TAILSCALE_SHORT"
+    fi
+
+    out "\033[34m[INFO]\033[0m SAN: DNS: $dns_list | IPs: $ip_count"
+  fi
 }
 
 detect_pihole_stack() {
@@ -743,7 +770,7 @@ test_lighttpd_config() {
 }
 
 apply_pihole_tls_install() {
-  out "\033[36m[STAGE 7/11]\033[0m Deploying certificate to Pi-hole (optional)..."
+  out "\033[36m[STAGE 8/11]\033[0m Deploying certificate to Pi-hole (optional)..."
 
   if [ "$PIHOLE_PRESENT" -eq 0 ]; then
     out "\033[33m[INFO]\033[0m Pi-hole not present. Skipping."
@@ -900,7 +927,7 @@ restart_technitium_after_renew_if_needed() {
 }
 
 configure_technitium_optional_install() {
-  out "\033[36m[STAGE 8/11]\033[0m Technitium configuration (optional)..."
+  out "\033[36m[STAGE 9/11]\033[0m Technitium configuration (optional)..."
 
   if [ "$TECH_PRESENT" -eq 0 ]; then
     out "\033[33m[INFO]\033[0m Technitium not detected or not reachable. Skipping."
@@ -1013,7 +1040,7 @@ configure_technitium_optional_install() {
 }
 
 apply_permissions() {
-  out "\033[36m[STAGE 9/11]\033[0m Setting permissions (root + group '${CERT_GROUP}')..."
+  out "\033[36m[STAGE 7/11]\033[0m Setting permissions (root + group '${CERT_GROUP}')..."
 
   getent group "$CERT_GROUP" >/dev/null 2>&1 || groupadd "$CERT_GROUP" >/dev/null 2>&1 || true
 
@@ -1191,10 +1218,12 @@ final_export_install() {
   fi
   pause_step
 
-  out "\033[34m[INFO]\033[0m Root CA PEM:"
-  echo ""
-  cat "$CA_CRT"
-  echo ""
+  out "\033[34m[INFO]\033[0m Root CA file:"
+  echo "$CA_CRT"
+  pause_step
+
+  out "\033[34m[INFO]\033[0m To print PEM:"
+  echo "$SCRIPT_CMD_NAME --print-ca"
   pause_step
 }
 
@@ -1269,6 +1298,13 @@ status() {
     echo "- State file: missing ($STATE_FILE)"
   fi
   echo ""
+}
+
+print_ca() {
+  require_installed
+  [ -f "$CA_CRT" ] || die "Root CA not found: $CA_CRT"
+  cat "$CA_CRT"
+  exit 0
 }
 
 remove_cron_entry() {
@@ -1480,7 +1516,12 @@ install_flow() {
   pause_step
 
   install_deps_interactive
-  install_self
+
+  if [ "${LOCAL_HTTPS_BOOTSTRAP:-0}" = "1" ] && [ -x "$INSTALL_PATH" ]; then
+    :
+  else
+    install_self
+  fi
 
   detect_pihole_and_technitium
   read_host_identity
@@ -1533,6 +1574,10 @@ parse_cli() {
       shift
       status
       exit 0
+      ;;
+    --print-ca)
+      shift
+      print_ca
       ;;
     --uninstall)
       shift
