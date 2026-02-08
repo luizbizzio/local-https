@@ -11,7 +11,7 @@ INSTALL_PATH="/usr/local/sbin/local-https"
 SOURCE_URL_DEFAULT="${REPO_RAW_BASE}/local-https.sh"
 SOURCE_URL="${LOCAL_HTTPS_SOURCE_URL:-$SOURCE_URL_DEFAULT}"
 
-EXPECTED_SHA256_DEFAULT="dea7f1e8d2b2b57e743dae338657d8eecc4b9948aaeb2d16460346b1fadf3363"
+EXPECTED_SHA256_DEFAULT="785e4106d0039046704b680cf2522ff84fd2ba2fd6c04c229b8808facdacdb8c"
 EXPECTED_SHA256="${LOCAL_HTTPS_EXPECTED_SHA256:-$EXPECTED_SHA256_DEFAULT}"
 
 NONINTERACTIVE="${LOCAL_HTTPS_NONINTERACTIVE:-0}"
@@ -26,10 +26,7 @@ require_root() {
 }
 
 tmpfile_make() {
-  local t=""
-  t="$(mktemp -p /tmp local-https.install.XXXXXX)"
-  chmod 600 "$t" >/dev/null 2>&1 || true
-  echo "$t"
+  mktemp -p /tmp local-https.install.XXXXXX
 }
 
 curl_fetch() {
@@ -39,7 +36,8 @@ curl_fetch() {
   curl -fsSL --proto '=https' --tlsv1.2 \
     --connect-timeout 10 \
     --max-time 60 \
-    "$url" -o "$out_file"
+    -o "$out_file" \
+    "$url"
 }
 
 sha256_of_file() {
@@ -62,18 +60,14 @@ sha256_of_file() {
 verify_sha256_if_set() {
   local f="$1"
 
-  if [ -z "$EXPECTED_SHA256" ]; then
-    out "\033[33m[WARN]\033[0m No expected SHA-256 set. Skipping hash verification."
-    return 0
-  fi
+  [ -n "$EXPECTED_SHA256" ] || return 0
 
   local got=""
   got="$(sha256_of_file "$f" 2>/dev/null || true)"
-  [ -n "$got" ] || die "Cannot compute SHA-256 (need sha256sum/shasum/openssl)."
+  [ -n "$got" ] || die "Cannot compute SHA-256."
 
-  if [ "$got" != "$EXPECTED_SHA256" ]; then
+  [ "$got" = "$EXPECTED_SHA256" ] || \
     die "SHA-256 mismatch. Expected: $EXPECTED_SHA256 | Got: $got"
-  fi
 
   out "\033[32m[OK]\033[0m SHA-256 verified."
 }
@@ -82,34 +76,30 @@ sanity_check_script() {
   local f="$1"
 
   [ -s "$f" ] || die "Downloaded file is empty."
-  local bytes=0
-  bytes="$(wc -c < "$f" 2>/dev/null | tr -d ' ' || echo 0)"
-  [ "$bytes" -ge 2000 ] || die "Downloaded file too small ($bytes bytes). Refusing."
+  [ "$(wc -c < "$f")" -ge 2000 ] || die "Downloaded file too small."
 
-  head -n 1 "$f" | grep -Eq '^#!' || die "Downloaded file has no shebang. Refusing."
+  head -n 1 "$f" | grep -Eq '^#!' || die "Missing shebang."
 
-  if head -n 5 "$f" | grep -Eqi '<!doctype html|<html|github.com.*404|not found'; then
-    die "Downloaded content looks like HTML/404 page. Refusing."
+  if head -n 5 "$f" | grep -Eqi '<!doctype html|<html|404'; then
+    die "Downloaded content looks like HTML."
   fi
 
-  if ! grep -qE 'SCRIPT_CMD_NAME="local-https"|INSTALL_PATH="/usr/local/sbin/local-https"|parse_cli' "$f" 2>/dev/null; then
-    die "Downloaded file does not look like local-https.sh. Refusing."
-  fi
+  grep -qE 'SCRIPT_CMD_NAME="local-https"|parse_cli' "$f" || \
+    die "Downloaded file does not look like local-https.sh."
 }
 
 install_atomic() {
   local src="$1"
   local dst="$2"
 
-  install -d -m 755 "$(dirname "$dst")" >/dev/null 2>&1 || true
+  install -d -m 755 "$(dirname "$dst")"
 
-  local tmpdst=""
+  local tmpdst
   tmpdst="$(mktemp -p /tmp local-https.bin.XXXXXX)"
-  chmod 700 "$tmpdst" >/dev/null 2>&1 || true
+  chmod 700 "$tmpdst"
 
-  install -m 755 "$src" "$tmpdst" >/dev/null 2>&1 || die "Failed to stage install."
-  mv -f "$tmpdst" "$dst" >/dev/null 2>&1 || die "Failed to move into place."
-  chmod 755 "$dst" >/dev/null 2>&1 || true
+  install -m 755 "$src" "$tmpdst"
+  mv -f "$tmpdst" "$dst"
 }
 
 run_installer_interactive() {
@@ -118,15 +108,20 @@ run_installer_interactive() {
   if [ -r /dev/tty ] && [ -w /dev/tty ]; then
     exec </dev/tty >/dev/tty 2>/dev/tty env \
       LOCAL_HTTPS_BOOTSTRAP=1 \
-      LOCAL_HTTPS_NONINTERACTIVE=0 \
+      LOCAL_HTTPS_NONINTERACTIVE="$NONINTERACTIVE" \
+      LOCAL_HTTPS_AUTO_PIHOLE="${LOCAL_HTTPS_AUTO_PIHOLE:-}" \
       "$INSTALL_PATH" --install
   fi
 
   if [ -t 0 ]; then
-    exec env LOCAL_HTTPS_BOOTSTRAP=1 LOCAL_HTTPS_NONINTERACTIVE=0 "$INSTALL_PATH" --install
+    exec env \
+      LOCAL_HTTPS_BOOTSTRAP=1 \
+      LOCAL_HTTPS_NONINTERACTIVE="$NONINTERACTIVE" \
+      LOCAL_HTTPS_AUTO_PIHOLE="${LOCAL_HTTPS_AUTO_PIHOLE:-}" \
+      "$INSTALL_PATH" --install
   fi
 
-  die "Interactive input is required, but no TTY is available. Download then run: curl -fsSL \"$SOURCE_URL\" -o local-https.sh && sudo bash local-https.sh --install"
+  die "Interactive input required. Download and run locally."
 }
 
 main() {
@@ -138,24 +133,20 @@ main() {
   need_cmd head
   need_cmd wc
 
+  local tmp=""
+  cleanup() { [ -n "$tmp" ] && rm -f "$tmp" >/dev/null 2>&1 || true; }
+  trap cleanup EXIT
+
   out "\033[36m[INFO]\033[0m Downloading: $SOURCE_URL"
 
-  local tmp=""
   tmp="$(tmpfile_make)"
-
-  if curl_fetch "$SOURCE_URL" "$tmp"; then
-    :
-  else
-    rm -f "$tmp" >/dev/null 2>&1 || true
-    die "Download failed."
-  fi
+  curl_fetch "$SOURCE_URL" "$tmp" || die "Download failed."
 
   verify_sha256_if_set "$tmp"
   sanity_check_script "$tmp"
 
   out "\033[36m[INFO]\033[0m Installing: $INSTALL_PATH"
   install_atomic "$tmp" "$INSTALL_PATH"
-  rm -f "$tmp" >/dev/null 2>&1 || true
 
   out "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
 
