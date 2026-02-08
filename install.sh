@@ -143,7 +143,15 @@ main() {
   out "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
   out "\033[36m[INFO]\033[0m Running: local-https --install"
 
-  exec env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
+  if [ -t 0 ]; then
+    exec env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
+  fi
+  
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    exec </dev/tty >/dev/tty 2>/dev/tty env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
+  fi
 }
+
+die "Interactive mode required. Piped execution does not provide a TTY."
 
 main "$@"
