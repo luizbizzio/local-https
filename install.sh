@@ -112,6 +112,23 @@ install_atomic() {
   chmod 755 "$dst" >/dev/null 2>&1 || true
 }
 
+run_installer_interactive() {
+  out "\033[36m[INFO]\033[0m Running: local-https --install"
+
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    exec </dev/tty >/dev/tty 2>/dev/tty env \
+      LOCAL_HTTPS_BOOTSTRAP=1 \
+      LOCAL_HTTPS_NONINTERACTIVE=0 \
+      "$INSTALL_PATH" --install
+  fi
+
+  if [ -t 0 ]; then
+    exec env LOCAL_HTTPS_BOOTSTRAP=1 LOCAL_HTTPS_NONINTERACTIVE=0 "$INSTALL_PATH" --install
+  fi
+
+  die "Interactive input is required, but no TTY is available. Download then run: curl -fsSL \"$SOURCE_URL\" -o local-https.sh && sudo bash local-https.sh --install"
+}
+
 main() {
   require_root
   need_cmd curl
@@ -141,17 +158,8 @@ main() {
   rm -f "$tmp" >/dev/null 2>&1 || true
 
   out "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
-  out "\033[36m[INFO]\033[0m Running: local-https --install"
 
-  if [ -t 0 ]; then
-    exec env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
-  fi
-  
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    exec </dev/tty >/dev/tty 2>/dev/tty env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
-  fi
+  run_installer_interactive
 }
-
-die "Interactive mode required. Piped execution does not provide a TTY."
 
 main "$@"
