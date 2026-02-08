@@ -1904,7 +1904,7 @@ rotate_pfx_flow() {
   apply_permissions
   configure_technitium_required_install
 
-  print_star_hint
+  print_repo_hint
   write_state
   out "\033[32m[OK]\033[0m PFX password rotation completed."
   exit 0
@@ -1935,7 +1935,7 @@ configure_flow() {
   configure_technitium_required_install
   final_output_install
 
-  print_star_hint
+  print_repo_hint
   write_state
   out "\033[32m[OK]\033[0m Configure completed."
 }
@@ -1985,7 +1985,7 @@ install_flow() {
   apply_pihole_tls_install
   configure_technitium_required_install
   final_output_install
-  print_star_hint
+  print_repo_hint
 
   write_state
   out "\033[32m[OK]\033[0m Done."
