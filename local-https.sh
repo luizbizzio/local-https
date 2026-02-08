@@ -277,13 +277,10 @@ collect_san_ips_from_hostname_i() {
 
 print_repo_hint() {
   [ "${LOCAL_HTTPS_SHOW_REPO_HINT:-1}" = "0" ] && return 0
-  [ "$BOOTSTRAP" -eq 1 ] && return 0
-  [ ! -t 1 ] && return 0
-
   local repo="https://github.com/luizbizzio/local-https"
   echo ""
-  printf '%b\n' "\033[90mDocs, source, and support:\033[0m $repo"
-  printf '%b\n' "\033[90mIf this tool is useful, consider starring the repository.\033[0m"
+  printf '%b\n' "\033[90mDocumentation, source code, and issue tracker:\033[0m $repo"
+  printf '%b\n' "\033[90mIf this tool helped you, consider starring the repository.\033[0m"
 }
 
 write_state() {
@@ -1422,7 +1419,7 @@ configure_technitium_required_install() {
   [ "$SET_STATUS" = "ok" ] || die "Technitium settings/set failed."
 
   out "\033[32m[OK]\033[0m Technitium TLS settings applied."
-  out "\033[33m[INFO]\033[0m On renew, PFX is updated on disk. If Technitium does not reload it automatically, you may need to restart it manually."
+  out "\033[34m[INFO]\033[0m On renew, local-https updates: $SERVER_PFX"
 
   curl -fsSL $TECH_TLS_FLAGS --max-time 6 --get \
       --data-urlencode "token=$TOKEN" \
