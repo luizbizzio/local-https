@@ -276,12 +276,13 @@ collect_san_ips_from_hostname_i() {
 }
 
 print_repo_hint() {
+  [ "${LOCAL_HTTPS_SHOW_REPO_HINT:-1}" = "0" ] && return 0
   [ "$BOOTSTRAP" -eq 1 ] && return 0
-  [ "$NONINTERACTIVE" -eq 1 ] && return 0
+  [ ! -t 1 ] && return 0
 
   local repo="https://github.com/luizbizzio/local-https"
   echo ""
-  printf '%b\n' "\033[90mDocumentation, issues, and source:\033[0m $repo"
+  printf '%b\n' "\033[90mDocs, source, and support:\033[0m $repo"
   printf '%b\n' "\033[90mIf this tool is useful, consider starring the repository.\033[0m"
 }
 
