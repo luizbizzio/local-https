@@ -279,8 +279,8 @@ print_repo_hint() {
   [ "${LOCAL_HTTPS_SHOW_REPO_HINT:-1}" = "0" ] && return 0
   local repo="https://github.com/luizbizzio/local-https"
   echo ""
-  printf '%b\n' "\033[90mDocumentation, source code, and issue tracker:\033[0m $repo"
-  printf '%b\n' "\033[90mIf this tool helped you, consider starring the repository.\033[0m"
+  printf '%b\n' "\033[90mProject home, documentation, and issues:\033[0m $repo"
+  printf '%b\n' "\033[90mStarring the repo helps keep this project maintained.\033[0m"
 }
 
 write_state() {
