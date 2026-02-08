@@ -1,27 +1,31 @@
 #!/bin/bash
-set -e
-set -o pipefail
+set -euo pipefail
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-STEP_DELAY="${STEP_DELAY:-1.0}"
+STEP_DELAY="${STEP_DELAY:-0.8}"
 
 NONINTERACTIVE="${LOCAL_HTTPS_NONINTERACTIVE:-0}"
 VERBOSE="${LOCAL_HTTPS_VERBOSE:-0}"
 BOOTSTRAP="${LOCAL_HTTPS_BOOTSTRAP:-0}"
 
+SAN_MAX_IPS="${LOCAL_HTTPS_SAN_MAX_IPS:-20}"
+ADD_SUDO_USER_TO_CERT_GROUP="${LOCAL_HTTPS_ADD_SUDO_USER_TO_CERT_GROUP:-0}"
+TECH_INSECURE_TLS="${LOCAL_HTTPS_TECH_INSECURE_TLS:-0}"
+case "$TECH_INSECURE_TLS" in 1|true|TRUE|yes|YES) TECH_INSECURE_TLS=1 ;; *) TECH_INSECURE_TLS=0 ;; esac
+
 case "$NONINTERACTIVE" in 1|true|TRUE|yes|YES) NONINTERACTIVE=1 ;; *) NONINTERACTIVE=0 ;; esac
 case "$VERBOSE" in 1|true|TRUE|yes|YES) VERBOSE=1 ;; *) VERBOSE=0 ;; esac
 case "$BOOTSTRAP" in 1|true|TRUE|yes|YES) BOOTSTRAP=1 ;; *) BOOTSTRAP=0 ;; esac
+case "$ADD_SUDO_USER_TO_CERT_GROUP" in 1|true|TRUE|yes|YES) ADD_SUDO_USER_TO_CERT_GROUP=1 ;; *) ADD_SUDO_USER_TO_CERT_GROUP=0 ;; esac
 
 [ ! -t 0 ] && NONINTERACTIVE=1
-[ "$BOOTSTRAP" -eq 1 ] && NONINTERACTIVE=1
 
 pause_step() { [ "$NONINTERACTIVE" -eq 1 ] && return 0; [ ! -t 1 ] && return 0; sleep "$STEP_DELAY"; }
 
-out() { echo -e "$1"; pause_step; }
+out() { printf '%b\n' "$1"; pause_step; }
 vout() { [ "$VERBOSE" -eq 1 ] && out "$1" || true; }
-die() { echo -e "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
+die() { printf '%b\n' "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
 
 SCRIPT_CMD_NAME="local-https"
 INSTALL_PATH="/usr/local/sbin/local-https"
@@ -68,6 +72,7 @@ SYSTEMD_SERVICE_PATH="/etc/systemd/system/local-https-renew.service"
 SYSTEMD_TIMER_PATH="/etc/systemd/system/local-https-renew.timer"
 
 CRON_LOG_PATH="/var/log/local-https-renew.log"
+LOGROTATE_PATH="/etc/logrotate.d/local-https-renew"
 
 AUTORENEW_METHOD="none"
 CERT_RENEWED=0
@@ -75,12 +80,46 @@ FORCE_RENEW=0
 UNINSTALL_YES=0
 UNINSTALL_PURGE=0
 
-TECH_RESTART_ON_RENEW=1
-TECH_RESTART_CLI_SET=0
-
 has_systemctl() { command -v systemctl >/dev/null 2>&1; }
 has_service_cmd() { command -v service >/dev/null 2>&1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
+has_logger() { command -v logger >/dev/null 2>&1; }
+
+sh_quote() {
+  local s="$1"
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\\\\''/g")"
+}
+
+state_unquote() {
+  local v="$1"
+  if [ -z "$v" ]; then
+    printf '%s' ""
+    return 0
+  fi
+  case "$v" in
+    \'*\')
+      v="${v#\'}"
+      v="${v%\'}"
+      v="${v//\'\\\'\'/\'}"
+      printf '%s' "$v"
+      return 0
+      ;;
+    *)
+      printf '%s' "$v"
+      return 0
+      ;;
+  esac
+}
+
+read_state_value() {
+  local key="$1"
+  [ -f "$STATE_FILE" ] || return 0
+  local line val
+  line="$(grep -E "^${key}=" "$STATE_FILE" 2>/dev/null | head -n1 || true)"
+  [ -n "$line" ] || return 0
+  val="${line#*=}"
+  state_unquote "$val" || true
+}
 
 svc_active() {
   local name="$1"
@@ -172,15 +211,85 @@ prompt_yn_loop() {
   done
 }
 
-read_state_value() {
-  local key="$1"
-  [ -f "$STATE_FILE" ] || return 0
-  grep -E "^${key}=" "$STATE_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true
+is_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+is_ipv6() {
+  local ip="$1"
+  [[ "$ip" == *:* ]]
+}
+
+ip_ok_for_san() {
+  local ip="$1"
+
+  if is_ipv4 "$ip"; then
+    case "$ip" in
+      0.0.0.0) return 1 ;;
+      127.*) return 1 ;;
+      169.254.*) return 1 ;;
+      172.17.*|172.18.*|172.19.*|172.20.*) return 1 ;;
+    esac
+    return 0
+  fi
+
+  if is_ipv6 "$ip"; then
+    case "$ip" in
+      ::1) return 1 ;;
+      fe80:*|FE80:*) return 1 ;;
+    esac
+    return 0
+  fi
+
+  return 1
+}
+
+collect_san_ips_from_hostname_i() {
+  local raw ips out_ips="" kept=0 total=0 truncated=0
+  raw="$(hostname -I 2>/dev/null || true)"
+  raw="$(printf '%s' "$raw" | tr -s ' ' | sed 's/[[:space:]]*$//' || true)"
+
+  for ips in $raw; do
+    total=$((total + 1))
+    case "$ips" in
+      *%*) continue ;;
+    esac
+    ip_ok_for_san "$ips" || continue
+    if [ "$kept" -ge "$SAN_MAX_IPS" ]; then
+      truncated=1
+      continue
+    fi
+    if [ -z "$out_ips" ]; then
+      out_ips="$ips"
+    else
+      out_ips="$out_ips $ips"
+    fi
+    kept=$((kept + 1))
+  done
+
+  FILTERED_IPS="$out_ips"
+
+  if [ "$truncated" -eq 1 ]; then
+    vout "\033[33m[WARN]\033[0m Too many IPs for SAN. Truncated to $SAN_MAX_IPS."
+  fi
+}
+
+print_repo_hint() {
+  [ "$BOOTSTRAP" -eq 1 ] && return 0
+  [ "$NONINTERACTIVE" -eq 1 ] && return 0
+
+  local repo="https://github.com/luizbizzio/local-https"
+  echo ""
+  printf '%b\n' "\033[90mDocumentation, issues, and source:\033[0m $repo"
+  printf '%b\n' "\033[90mIf this tool is useful, consider starring the repository.\033[0m"
 }
 
 write_state() {
   install -d -m 755 "$STATE_DIR" >/dev/null 2>&1 || true
-  local ts applied tailscale="no" ca_fp="" srv_end="" method="" tr=""
+
+  local ts applied tailscale="no" ca_fp="" srv_end_raw="" srv_end_epoch="" srv_end_utc="" method="" installed_at
+
   ts="$(date -Is 2>/dev/null || date 2>/dev/null || echo unknown)"
 
   if command -v tailscale >/dev/null 2>&1; then
@@ -202,54 +311,71 @@ write_state() {
   fi
 
   if [ -f "$SERVER_CRT" ]; then
-    srv_end="$(openssl x509 -in "$SERVER_CRT" -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
+    srv_end_raw="$(openssl x509 -in "$SERVER_CRT" -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
+    if [ -n "$srv_end_raw" ]; then
+      srv_end_epoch="$(date -u -d "$srv_end_raw" +%s 2>/dev/null || true)"
+      if [ -n "$srv_end_epoch" ]; then
+        srv_end_utc="$(date -u -d "@$srv_end_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+      fi
+    fi
   fi
 
   method="${AUTORENEW_METHOD:-}"
   [ -n "$method" ] || method="$(read_state_value autorenew_method)"
   [ -n "$method" ] || method="none"
 
-  tr="${TECH_RESTART_ON_RENEW:-}"
-  [ -n "$tr" ] || tr="$(read_state_value tech_restart_on_renew)"
-  [ -n "$tr" ] || tr="1"
+  installed_at="$(read_state_value installed_at)"
+  [ -n "$installed_at" ] || installed_at="$ts"
 
-  cat > "$STATE_FILE" <<EOF
-installed_at=$(read_state_value installed_at)
-last_run_at=$ts
-hostname=${HOSTNAME:-$(hostname 2>/dev/null || true)}
-applied_targets=$applied
-autorenew_method=$method
-tech_restart_on_renew=$tr
-pihole_detected=${PIHOLE_PRESENT:-0}
-technitium_detected=${TECH_PRESENT:-0}
-tailscale_detected=$tailscale
-rootca_fingerprint_sha256=$ca_fp
-server_enddate=$srv_end
-cert_renewed=${CERT_RENEWED:-0}
-EOF
+  {
+    echo "installed_at=$(sh_quote "$installed_at")"
+    echo "last_run_at=$(sh_quote "$ts")"
+    echo "hostname=$(sh_quote "${HOSTNAME:-$(hostname 2>/dev/null || true)}")"
+    echo "applied_targets=$(sh_quote "$applied")"
+    echo "autorenew_method=$(sh_quote "$method")"
+    echo "pihole_detected=$(sh_quote "${PIHOLE_PRESENT:-0}")"
+    echo "technitium_detected=$(sh_quote "${TECH_PRESENT:-0}")"
+    echo "tailscale_detected=$(sh_quote "$tailscale")"
+    echo "rootca_fingerprint_sha256=$(sh_quote "$ca_fp")"
+    echo "server_enddate_raw=$(sh_quote "$srv_end_raw")"
+    echo "server_enddate_epoch=$(sh_quote "$srv_end_epoch")"
+    echo "server_enddate_utc=$(sh_quote "$srv_end_utc")"
+    echo "cert_renewed=$(sh_quote "${CERT_RENEWED:-0}")"
+  } > "$STATE_FILE"
 
   touch "$INSTALL_MARKER" >/dev/null 2>&1 || true
-
-  if [ -z "$(read_state_value installed_at)" ]; then
-    sed -i "s/^installed_at=$/installed_at=$ts/" "$STATE_FILE" >/dev/null 2>&1 || true
-  fi
 }
 
 detect_technitium_service_name() {
   TECH_SERVICE=""
-  if ! has_systemctl; then
-    return 0
-  fi
+  has_systemctl || return 0
 
-  local unit=""
-  unit="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -Ei '^technitium.*\.service$' | head -n1 || true)"
-  if [ -n "$unit" ]; then
-    TECH_SERVICE="$unit"
-    return 0
-  fi
+  local candidates=(
+    technitium-dns.service
+    technitiumdns.service
+    TechnitiumDnsServer.service
+    dns.service
+  )
 
-  unit="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -Ei '(^|-)technitium(-|).*\.service$' | head -n1 || true)"
-  [ -n "$unit" ] && TECH_SERVICE="$unit" || true
+  local svc=""
+  for svc in "${candidates[@]}"; do
+    systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$svc" || continue
+    local exec=""
+    exec="$(systemctl show -p ExecStart --value "$svc" 2>/dev/null || true)"
+    printf '%s' "$exec" | grep -Eqi 'technitium|TechnitiumDnsServer|dnsserver' || continue
+    TECH_SERVICE="$svc"
+    return 0
+  done
+
+  local fallback=""
+  fallback="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
+    | awk '{print $1}' \
+    | grep -Ei '^technitium.*\.service$' \
+    | head -n1 || true)"
+
+  if [ -n "$fallback" ]; then
+    TECH_SERVICE="$fallback"
+  fi
 }
 
 build_renew_args() {
@@ -257,7 +383,28 @@ build_renew_args() {
 }
 
 cron_line_build() {
+  if has_logger; then
+    echo "0 3 * * * $INSTALL_PATH --renew 2>&1 | logger -t local-https"
+    return 0
+  fi
   echo "0 3 * * * $INSTALL_PATH --renew >> $CRON_LOG_PATH 2>&1"
+}
+
+install_logrotate_for_cron_log() {
+  [ -f "$CRON_LOG_PATH" ] || touch "$CRON_LOG_PATH" >/dev/null 2>&1 || true
+  chmod 644 "$CRON_LOG_PATH" >/dev/null 2>&1 || true
+
+  cat > "$LOGROTATE_PATH" <<EOF
+$CRON_LOG_PATH {
+  weekly
+  rotate 8
+  missingok
+  notifempty
+  compress
+  delaycompress
+  copytruncate
+}
+EOF
 }
 
 upsert_block() {
@@ -312,10 +459,12 @@ print_help() {
   echo ""
   echo "Usage:"
   echo "  $SCRIPT_CMD_NAME --install"
-  echo "  $SCRIPT_CMD_NAME --renew [--force-renew] [--no-tech-restart]"
+  echo "  $SCRIPT_CMD_NAME --renew [--force-renew]"
   echo "  $SCRIPT_CMD_NAME --check"
   echo "  $SCRIPT_CMD_NAME --status"
   echo "  $SCRIPT_CMD_NAME --print-ca"
+  echo "  $SCRIPT_CMD_NAME --print-pfx-pass"
+  echo "  $SCRIPT_CMD_NAME --rotate-pfx-pass"
   echo "  $SCRIPT_CMD_NAME --configure"
   echo "  $SCRIPT_CMD_NAME --uninstall [--yes] [--purge-certs]"
   echo ""
@@ -327,23 +476,61 @@ print_help() {
 }
 
 banner() {
+  local cmd="${1:-}"
+  local mode="install"
+
+  case "$cmd" in
+    --install) mode="install" ;;
+    --configure) mode="configure" ;;
+    --rotate-pfx-pass) mode="rotate-pfx-pass" ;;
+    --renew) mode="renew" ;;
+    --uninstall) mode="uninstall" ;;
+  esac
+
+  printf '%b\n' "\033[36m============================================================\033[0m"
+  printf '%b\n' "\033[1m\033[36m local-https\033[0m \033[90m(${mode})\033[0m"
+  printf '%b\n' "\033[36m============================================================\033[0m"
+  echo ""
+
   if [ "$BOOTSTRAP" -eq 1 ]; then
-    echo -e "\033[36m============================================================\033[0m"
-    echo -e "\033[1m\033[36m local-https\033[0m \033[90m(install)\033[0m"
-    echo -e "\033[36m============================================================\033[0m"
-    echo ""
     return 0
   fi
 
-  echo -e "\033[36m============================================================\033[0m"
-  echo -e "\033[1m\033[36m Local HTTPS Certificate Manager\033[0m \033[90m(local CA + renew + deploy)\033[0m"
-  echo -e "\033[36m============================================================\033[0m"
+  printf '%b\n' "\033[1mWhat this does\033[0m"
+  printf '%b\n' "  - Create a local Root CA"
+  printf '%b\n' "  - Issue a server cert (40 days) + build PEM and PFX"
   echo ""
-  echo -e "\033[1mCommands\033[0m"
-  echo -e "  - $SCRIPT_CMD_NAME --install"
-  echo -e "  - $SCRIPT_CMD_NAME --renew [--force-renew] [--no-tech-restart]"
-  echo -e "  - $SCRIPT_CMD_NAME --configure"
-  echo -e "  - $SCRIPT_CMD_NAME --check | --status | --print-ca | --uninstall"
+
+  printf '%b\n' "\033[1mFiles\033[0m"
+  printf '%b\n' "  - Dir: $SSL_DIR"
+  printf '%b\n' "  - Root CA: $CA_CRT"
+  printf '%b\n' "  - Server PEM: $SERVER_PEM"
+  printf '%b\n' "  - Server PFX: $SERVER_PFX (password in $PFX_PASS_FILE)"
+  echo ""
+
+  case "$mode" in
+    install)
+      printf '%b\n' "\033[1mDuring install\033[0m"
+      printf '%b\n' "  - Setup auto renew (systemd or cron)"
+      printf '%b\n' "  - Optional: deploy to Pi-hole"
+      printf '%b\n' "  - If Technitium is detected: TLS will be set to the PFX"
+      echo ""
+      ;;
+    configure)
+      printf '%b\n' "\033[1mDuring configure\033[0m"
+      printf '%b\n' "  - Optional: deploy to Pi-hole"
+      printf '%b\n' "  - If Technitium is detected: TLS will be set to the PFX"
+      echo ""
+      ;;
+    rotate-pfx-pass)
+      printf '%b\n' "\033[1mDuring rotate\033[0m"
+      printf '%b\n' "  - Rotate PFX password and rebuild PFX"
+      printf '%b\n' "  - If Technitium is detected: TLS will be updated to the new PFX password"
+      echo ""
+      ;;
+  esac
+
+  printf '%b\n' "\033[90mHelp:\033[0m $SCRIPT_CMD_NAME --help"
   echo ""
 }
 
@@ -355,12 +542,12 @@ confirm_start() {
   if prompt_yn "Continue? (y/N): " "N"; then
     return 0
   fi
-  echo -e "\033[31mAborted.\033[0m"
+  printf '%b\n' "\033[31mAborted.\033[0m"
   exit 1
 }
 
 install_deps_interactive() {
-  out "\033[36m[STAGE 1/11]\033[0m Checking dependencies..."
+  out "\033[36m[STAGE]\033[0m Checking dependencies..."
   need_apt
 
   PKGS=()
@@ -384,7 +571,7 @@ ensure_runtime_deps() {
 }
 
 install_self() {
-  out "\033[36m[STEP]\033[0m Installing command: $INSTALL_PATH"
+  out "\033[36m[STAGE]\033[0m Installing command: $INSTALL_PATH"
 
   local src=""
   local tmp=""
@@ -429,12 +616,44 @@ install_self() {
   out "\033[32m[OK]\033[0m Installed: $INSTALL_PATH"
 
   if [ "${LOCAL_HTTPS_BOOTSTRAP:-0}" != "1" ]; then
-    exec env LOCAL_HTTPS_BOOTSTRAP=1 LOCAL_HTTPS_NONINTERACTIVE=1 "$INSTALL_PATH" --install
+    exec env LOCAL_HTTPS_BOOTSTRAP=1 "$INSTALL_PATH" --install
   fi
 }
 
+technitium_detect_base_url() {
+  TECH_BASE_URL=""
+  TECH_PRESENT=0
+
+  local code=""
+
+  code="$(curl -k -sS -o /dev/null -w '%{http_code}' --max-time 3 "https://127.0.0.1:53443/" 2>/dev/null || true)"
+  if [ -n "$code" ] && [ "$code" != "000" ]; then
+    TECH_BASE_URL="https://127.0.0.1:53443"
+    TECH_PRESENT=1
+    return 0
+  fi
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:5380/" 2>/dev/null || true)"
+  if [ "$code" = "200" ]; then
+    TECH_BASE_URL="http://127.0.0.1:5380"
+    TECH_PRESENT=1
+    return 0
+  fi
+
+  if [ "$code" = "301" ] || [ "$code" = "302" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
+    code="$(curl -k -sS -o /dev/null -w '%{http_code}' --max-time 3 "https://127.0.0.1:53443/" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then
+      TECH_BASE_URL="https://127.0.0.1:53443"
+      TECH_PRESENT=1
+      return 0
+    fi
+  fi
+
+  return 0
+}
+
 detect_pihole_and_technitium() {
-  out "\033[36m[STAGE 2/11]\033[0m Detecting Pi-hole and Technitium..."
+  out "\033[36m[STAGE]\033[0m Detecting Pi-hole and Technitium..."
 
   if command -v pihole >/dev/null 2>&1; then
     PIHOLE_PRESENT=1
@@ -448,13 +667,7 @@ detect_pihole_and_technitium() {
   TECH_PRESENT=0
 
   if command -v curl >/dev/null 2>&1; then
-    if curl -k -sS -o /dev/null --max-time 3 "https://127.0.0.1:53443/" 2>/dev/null; then
-      TECH_BASE_URL="https://127.0.0.1:53443"
-      TECH_PRESENT=1
-    elif curl -sS -o /dev/null --max-time 3 "http://127.0.0.1:5380/" 2>/dev/null; then
-      TECH_BASE_URL="http://127.0.0.1:5380"
-      TECH_PRESENT=1
-    fi
+    technitium_detect_base_url
   fi
 
   if [ "$TECH_PRESENT" -eq 1 ]; then
@@ -472,27 +685,16 @@ detect_pihole_and_technitium() {
 }
 
 read_host_identity() {
-  out "\033[36m[STAGE 3/11]\033[0m Reading host identity..."
+  out "\033[36m[STAGE]\033[0m Reading host identity..."
 
   HOSTNAME="$(hostname 2>/dev/null || true)"
   [ -n "$HOSTNAME" ] || HOSTNAME="localhost"
 
-  ALL_IPS="$(hostname -I 2>/dev/null || true)"
-  ALL_IPS="$(printf '%s' "$ALL_IPS" | tr -s ' ' | sed 's/[[:space:]]*$//' || true)"
-
-  FILTERED_IPS=""
-  for IP in $ALL_IPS; do
-    case "$IP" in
-      *%*) continue ;;
-      *:*) FILTERED_IPS="$FILTERED_IPS $IP" ;;
-      *.*.*.*) FILTERED_IPS="$FILTERED_IPS $IP" ;;
-      *) continue ;;
-    esac
-  done
-  FILTERED_IPS="$(echo "$FILTERED_IPS" | xargs || true)"
+  collect_san_ips_from_hostname_i
 
   local ip_count=0
   local first_ip=""
+  local IP=""
   for IP in $FILTERED_IPS; do
     ip_count=$((ip_count + 1))
     [ -z "$first_ip" ] && first_ip="$IP"
@@ -500,7 +702,6 @@ read_host_identity() {
 
   out "\033[34m[INFO]\033[0m Hostname: $HOSTNAME"
   out "\033[34m[INFO]\033[0m SAN IPs: ${ip_count:-0} (example: ${first_ip:-none})"
-  vout "\033[34m[INFO]\033[0m IPs (raw): ${ALL_IPS:-none}"
   vout "\033[34m[INFO]\033[0m IPs (SAN full): ${FILTERED_IPS:-none}"
 
   TAILSCALE_DNS=""
@@ -522,7 +723,7 @@ read_host_identity() {
 }
 
 prepare_dir() {
-  out "\033[36m[STAGE 4/11]\033[0m Preparing certificate directory..."
+  out "\033[36m[STAGE]\033[0m Preparing certificate directory..."
   mkdir -p "$SSL_DIR"
   cd "$SSL_DIR" || die "Failed to cd into $SSL_DIR."
   out "\033[32m[OK]\033[0m Using directory: $SSL_DIR"
@@ -530,7 +731,7 @@ prepare_dir() {
 }
 
 create_or_reuse_ca() {
-  out "\033[36m[STAGE 5/11]\033[0m Creating or reusing Root CA..."
+  out "\033[36m[STAGE]\033[0m Creating or reusing Root CA..."
 
   cat << EOF > ca-openssl.cnf
 [ req ]
@@ -572,7 +773,12 @@ server_cert_needs_renew() {
 }
 
 issue_or_renew_server_cert() {
-  out "\033[36m[STAGE 6/11]\033[0m Issuing or renewing server certificate..."
+  local QUIET=0
+  if [ "$NONINTERACTIVE" -eq 1 ] && [ "$VERBOSE" -eq 0 ]; then
+    QUIET=1
+  fi
+
+  [ "$QUIET" -eq 1 ] || out "\033[36m[STAGE]\033[0m Issuing or renewing server certificate..."
 
   [ -n "${HOSTNAME:-}" ] || HOSTNAME="$(hostname 2>/dev/null || true)"
   [ -n "${HOSTNAME:-}" ] || HOSTNAME="localhost"
@@ -613,6 +819,7 @@ EOF
   fi
 
   IP_INDEX=1
+  local IP=""
   for IP in $FILTERED_IPS; do
     [ -n "$IP" ] && echo "IP.${IP_INDEX} = $IP" >> server-openssl.cnf && IP_INDEX=$((IP_INDEX + 1))
   done
@@ -647,13 +854,21 @@ EOF
 
     [ -n "$old_umask" ] && umask "$old_umask" >/dev/null 2>&1 || true
 
-    if [ "$FORCE_RENEW" -eq 1 ]; then
-      out "\033[32m[OK]\033[0m Server certificate forced renew (40 days)."
+    if [ "$QUIET" -eq 1 ]; then
+      out "\033[32m[OK]\033[0m Server certificate renewed (40 days)."
     else
-      out "\033[32m[OK]\033[0m Server certificate issued or renewed (40 days)."
+      if [ "$FORCE_RENEW" -eq 1 ]; then
+        out "\033[32m[OK]\033[0m Server certificate forced renew (40 days)."
+      else
+        out "\033[32m[OK]\033[0m Server certificate issued or renewed (40 days)."
+      fi
     fi
   else
-    out "\033[32m[OK]\033[0m Server certificate still valid. No renewal needed."
+    [ "$QUIET" -eq 1 ] || out "\033[32m[OK]\033[0m Server certificate still valid. No renewal needed."
+  fi
+
+  if [ "$QUIET" -eq 1 ]; then
+    return 0
   fi
 
   if [ "$VERBOSE" -eq 1 ]; then
@@ -680,17 +895,171 @@ EOF
   fi
 }
 
+generate_random_password() {
+  local p=""
+  p="$(openssl rand -base64 32 2>/dev/null | tr -d '\n' || true)"
+  [ -n "$p" ] || p="$(openssl rand -hex 32 2>/dev/null | tr -d '\n' || true)"
+  [ -n "$p" ] || die "Failed to generate random password."
+  printf '%s' "$p"
+}
+
+ensure_pfx_password_file() {
+  if [ -f "$PFX_PASS_FILE" ] && [ -s "$PFX_PASS_FILE" ]; then
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [ -n "${LOCAL_HTTPS_PFX_PASSWORD:-}" ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    printf '%s' "$LOCAL_HTTPS_PFX_PASSWORD" > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [ -n "${LOCAL_HTTPS_PFX_PASSWORD_FILE:-}" ] && [ -f "$LOCAL_HTTPS_PFX_PASSWORD_FILE" ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    cat "$LOCAL_HTTPS_PFX_PASSWORD_FILE" > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    generate_random_password > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    out "\033[32m[OK]\033[0m PFX password generated and stored: $PFX_PASS_FILE"
+    return 0
+  fi
+
+  if prompt_yn_loop "Generate random PFX password and store it? (Y/n): " "Y"; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    generate_random_password > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    out "\033[32m[OK]\033[0m PFX password generated and stored: $PFX_PASS_FILE"
+    out "\033[34m[INFO]\033[0m To print it: $SCRIPT_CMD_NAME --print-pfx-pass"
+    return 0
+  fi
+
+  while true; do
+    local p1="" p2=""
+    read -r -s -p "Create PFX password (required): " p1
+    echo ""
+    read -r -s -p "Confirm PFX password: " p2
+    echo ""
+    if [ -n "$p1" ] && [ "$p1" = "$p2" ]; then
+      install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      printf '%s' "$p1" > "$PFX_PASS_FILE"
+      chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      out "\033[32m[OK]\033[0m PFX password stored: $PFX_PASS_FILE"
+      return 0
+    fi
+    out "\033[33m[WARN]\033[0m Password empty or mismatch. Try again."
+  done
+}
+
+rotate_pfx_password_file() {
+  if [ -n "${LOCAL_HTTPS_PFX_PASSWORD:-}" ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    printf '%s' "$LOCAL_HTTPS_PFX_PASSWORD" > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [ -n "${LOCAL_HTTPS_PFX_PASSWORD_FILE:-}" ] && [ -f "$LOCAL_HTTPS_PFX_PASSWORD_FILE" ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    cat "$LOCAL_HTTPS_PFX_PASSWORD_FILE" > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    generate_random_password > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if prompt_yn_loop "Rotate to a new random PFX password? (Y/n): " "Y"; then
+    install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    generate_random_password > "$PFX_PASS_FILE"
+    chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+    out "\033[32m[OK]\033[0m PFX password rotated: $PFX_PASS_FILE"
+    out "\033[34m[INFO]\033[0m To print it: $SCRIPT_CMD_NAME --print-pfx-pass"
+    return 0
+  fi
+
+  while true; do
+    local p1="" p2=""
+    read -r -s -p "New PFX password (required): " p1
+    echo ""
+    read -r -s -p "Confirm new PFX password: " p2
+    echo ""
+    if [ -n "$p1" ] && [ "$p1" = "$p2" ]; then
+      install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      printf '%s' "$p1" > "$PFX_PASS_FILE"
+      chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+      out "\033[32m[OK]\033[0m PFX password rotated: $PFX_PASS_FILE"
+      return 0
+    fi
+    out "\033[33m[WARN]\033[0m Password empty or mismatch. Try again."
+  done
+}
+
+create_or_update_pfx() {
+  out "\033[36m[STAGE]\033[0m Creating/Updating password-protected PFX..."
+
+  [ -f "$CA_CRT" ] || die "Root CA missing: $CA_CRT"
+  [ -f "$SERVER_CRT" ] || die "Server cert missing: $SERVER_CRT"
+  [ -f "$SERVER_KEY" ] || die "Server key missing: $SERVER_KEY"
+
+  ensure_pfx_password_file
+
+  openssl pkcs12 -export \
+    -out "$SERVER_PFX" \
+    -inkey "$SERVER_KEY" \
+    -in "$SERVER_CRT" \
+    -certfile "$CA_CRT" \
+    -passout file:"$PFX_PASS_FILE" >/dev/null 2>&1 || die "Failed to create PFX: $SERVER_PFX"
+
+  out "\033[32m[OK]\033[0m PFX ready: $SERVER_PFX"
+}
+
 detect_pihole_stack() {
   if [ -f "/etc/lighttpd/conf-enabled/15-pihole-admin.conf" ] || [ -f "/etc/lighttpd/conf-enabled/10-pihole.conf" ]; then
     echo "lighttpd"
     return 0
   fi
-  if svc_active lighttpd >/dev/null 2>&1 || pgrep -x lighttpd >/dev/null 2>&1; then
+
+  local has_pgrep=0
+  command -v pgrep >/dev/null 2>&1 && has_pgrep=1
+
+  if svc_active lighttpd >/dev/null 2>&1; then
     if [ "$PIHOLE_PRESENT" -eq 1 ]; then
       echo "lighttpd"
       return 0
     fi
   fi
+
+  if [ "$has_pgrep" -eq 1 ]; then
+    if pgrep -x lighttpd >/dev/null 2>&1; then
+      if [ "$PIHOLE_PRESENT" -eq 1 ]; then
+        echo "lighttpd"
+        return 0
+      fi
+    fi
+  fi
+
   if command -v pihole-FTL >/dev/null 2>&1; then
     echo "ftl"
     return 0
@@ -789,7 +1158,7 @@ test_lighttpd_config() {
 }
 
 apply_pihole_tls_install() {
-  out "\033[36m[STAGE 8/11]\033[0m Deploying certificate to Pi-hole (optional)..."
+  out "\033[36m[STAGE]\033[0m Deploying certificate to Pi-hole (optional)..."
 
   if [ "$PIHOLE_PRESENT" -eq 0 ]; then
     out "\033[33m[INFO]\033[0m Pi-hole not present. Skipping."
@@ -913,135 +1282,131 @@ apply_pihole_tls_renew_noninteractive() {
   return 0
 }
 
-maybe_update_pfx_on_renew() {
-  [ -f "$PFX_PASS_FILE" ] || return 0
-  [ -s "$PFX_PASS_FILE" ] || return 0
-  [ -f "$SERVER_KEY" ] && [ -f "$SERVER_CRT" ] && [ -f "$CA_CRT" ] || return 0
-  chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
-  chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
-
-  if openssl pkcs12 -export -out "$SERVER_PFX" -inkey "$SERVER_KEY" -in "$SERVER_CRT" -certfile "$CA_CRT" -passout file:"$PFX_PASS_FILE" >/dev/null 2>&1; then
-    out "\033[32m[OK]\033[0m PFX updated: $SERVER_PFX"
+tech_curl_tls_flags() {
+  if [ -n "${TECH_BASE_URL:-}" ] && printf '%s' "$TECH_BASE_URL" | grep -q '^https://'; then
+    if [ "${TECH_INSECURE_TLS:-0}" -eq 1 ]; then
+      printf '%s' "-k"
+      return 0
+    fi
+    if [ -f "$CA_CRT" ] && curl -sS --max-time 2 --cacert "$CA_CRT" "${TECH_BASE_URL}/" >/dev/null 2>&1; then
+      printf '%s' "--cacert $CA_CRT"
+      return 0
+    fi
+    printf '%s' "-k"
     return 0
   fi
-
-  out "\033[33m[WARN]\033[0m Failed to update PFX: $SERVER_PFX"
-  return 1
+  printf '%s' ""
 }
 
-restart_technitium_after_renew_if_needed() {
-  [ "${TECH_PRESENT:-0}" -eq 1 ] || return 0
-  [ "${CERT_RENEWED:-0}" -eq 1 ] || return 0
-  [ "${TECH_RESTART_ON_RENEW:-1}" -eq 1 ] || return 0
-
-  detect_technitium_service_name
-
-  if [ -n "$TECH_SERVICE" ]; then
-    restart_or_warn "$TECH_SERVICE" "Technitium" || true
-    return 0
-  fi
-
-  out "\033[33m[WARN]\033[0m Technitium detected, but service name not found. You may need to restart it manually."
-  return 0
-}
-
-configure_technitium_optional_install() {
-  out "\033[36m[STAGE 9/11]\033[0m Technitium configuration (optional)..."
+configure_technitium_required_install() {
+  out "\033[36m[STAGE]\033[0m Technitium configuration (required if detected)..."
 
   if [ "$TECH_PRESENT" -eq 0 ]; then
-    out "\033[33m[INFO]\033[0m Technitium not detected or not reachable. Skipping."
+    out "\033[33m[INFO]\033[0m Technitium not detected. Skipping."
     return 0
   fi
 
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
-    out "\033[34m[INFO]\033[0m Technitium detected. Skipping TLS API config. Run: $SCRIPT_CMD_NAME --configure"
-    return 0
+  need_cmd curl || die "Technitium detected but curl missing."
+  need_cmd jq || die "Technitium detected but jq missing."
+
+  local TECH_TLS_FLAGS=""
+  TECH_TLS_FLAGS="$(tech_curl_tls_flags)"
+
+  local TECH_USER="${LOCAL_HTTPS_TECH_USER:-admin}"
+  local TECH_PASS="${LOCAL_HTTPS_TECH_PASS:-}"
+  local TECH_PASS_FILE_SRC="${LOCAL_HTTPS_TECH_PASS_FILE:-}"
+  local TOTP="${LOCAL_HTTPS_TECH_TOTP:-}"
+
+  if [ -z "$TECH_PASS" ] && [ -n "$TECH_PASS_FILE_SRC" ] && [ -f "$TECH_PASS_FILE_SRC" ]; then
+    TECH_PASS="$(cat "$TECH_PASS_FILE_SRC" 2>/dev/null || true)"
   fi
 
-  if ! prompt_yn_loop "Configure Technitium TLS now? (y/N): " "N"; then
-    out "\033[33m[INFO]\033[0m Skipping Technitium TLS config."
-    return 0
-  fi
-  pause_step
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
+    [ -n "$TECH_PASS" ] || die "Technitium detected. Password is required. Use LOCAL_HTTPS_TECH_PASS or LOCAL_HTTPS_TECH_PASS_FILE."
+  else
+    if [ -t 0 ]; then
+      local INPUT_USER=""
+      read -r -p "Technitium username (default: ${TECH_USER}): " INPUT_USER
+      [ -n "$INPUT_USER" ] && TECH_USER="$INPUT_USER"
 
-  TECH_USER="admin"
-  if [ "$NONINTERACTIVE" -eq 0 ]; then
-    read -r -p "Technitium username (default: admin): " INPUT_USER
-    [ -n "$INPUT_USER" ] && TECH_USER="$INPUT_USER"
-  fi
-  pause_step
+      if [ -z "$TECH_PASS" ]; then
+        read -r -s -p "Technitium password (hidden, required): " TECH_PASS
+        echo ""
+      fi
 
-  TECH_PASS=""
-  if [ "$NONINTERACTIVE" -eq 0 ]; then
-    read -r -s -p "Technitium password (hidden): " TECH_PASS
-    echo ""
-  fi
-  pause_step
-
-  TOTP=""
-  if [ "$NONINTERACTIVE" -eq 0 ]; then
-    read -r -p "TOTP (2FA) code if enabled (optional): " TOTP
-  fi
-  pause_step
-
-  PFX_PASSWORD=""
-  if [ "$NONINTERACTIVE" -eq 0 ]; then
-    read -r -s -p "Create PFX password (required): " PFX_PASSWORD
-    echo ""
-  fi
-  pause_step
-
-  PFX_PASSWORD_CONFIRM=""
-  if [ "$NONINTERACTIVE" -eq 0 ]; then
-    read -r -s -p "Confirm PFX password: " PFX_PASSWORD_CONFIRM
-    echo ""
-  fi
-  pause_step
-
-  if [ -z "$PFX_PASSWORD" ] || [ "$PFX_PASSWORD" != "$PFX_PASSWORD_CONFIRM" ]; then
-    out "\033[33m[WARN]\033[0m PFX password empty or mismatch. Skipping Technitium."
-    return 0
+      if [ -z "$TOTP" ]; then
+        read -r -p "TOTP (2FA) code if enabled (optional): " TOTP
+      fi
+    fi
   fi
 
-  install -m 600 -o root -g root /dev/null "$PFX_PASS_FILE" >/dev/null 2>&1 || true
-  printf '%s' "$PFX_PASSWORD" > "$PFX_PASS_FILE"
-  chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
-  chown root:root "$PFX_PASS_FILE" >/dev/null 2>&1 || true
-  out "\033[32m[OK]\033[0m PFX password stored for auto renew: $PFX_PASS_FILE"
+  [ -n "$TECH_PASS" ] || die "Technitium detected. Password is required."
 
-  openssl pkcs12 -export -out "$SERVER_PFX" -inkey "$SERVER_KEY" -in "$SERVER_CRT" -certfile "$CA_CRT" -passout file:"$PFX_PASS_FILE" >/dev/null 2>&1 || die "Failed to create PFX."
-  out "\033[32m[OK]\033[0m PFX created: $SERVER_PFX"
+  [ -f "$SERVER_PFX" ] || die "PFX missing: $SERVER_PFX"
+  [ -f "$PFX_PASS_FILE" ] && [ -s "$PFX_PASS_FILE" ] || die "PFX password file missing/empty: $PFX_PASS_FILE"
 
-  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    out "\033[33m[WARN]\033[0m curl/jq missing. Skipping Technitium API config."
-    return 0
-  fi
+  local max_tries=5
+  local try=1
+  local LOGIN_JSON=""
+  local STATUS=""
+  local TOKEN=""
 
-  local tech_pass_file=""
-  tech_pass_file="$(mktemp)"
-  chmod 600 "$tech_pass_file" >/dev/null 2>&1 || true
-  printf '%s' "$TECH_PASS" > "$tech_pass_file"
+  while true; do
+    LOGIN_JSON="$(curl -fsSL $TECH_TLS_FLAGS --max-time 10 -X POST \
+      --data-urlencode "user=$TECH_USER" \
+      --data-urlencode "pass=$TECH_PASS" \
+      --data-urlencode "includeInfo=true" \
+      ${TOTP:+--data-urlencode "totp=$TOTP"} \
+      "${TECH_BASE_URL}/api/user/login" 2>/dev/null || true)"
 
-  LOGIN_JSON=""
-  LOGIN_JSON="$(curl -kfsSL --max-time 10 -X POST \
-    --data-urlencode "user=$TECH_USER" \
-    --data-urlencode "pass@${tech_pass_file}" \
-    --data-urlencode "includeInfo=true" \
-    ${TOTP:+--data-urlencode "totp=$TOTP"} \
-    "${TECH_BASE_URL}/api/user/login" 2>/dev/null || true)"
+    STATUS="$(printf '%s' "$LOGIN_JSON" | jq -r '.status' 2>/dev/null || echo "error")"
 
-  rm -f "$tech_pass_file" >/dev/null 2>&1 || true
+    if [ -n "$LOGIN_JSON" ] && [ "$STATUS" = "ok" ]; then
+      TOKEN="$(printf '%s' "$LOGIN_JSON" | jq -r '.token' 2>/dev/null || echo "")"
+      [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || die "Technitium token missing."
+      break
+    fi
 
-  [ -n "$LOGIN_JSON" ] || { out "\033[33m[WARN]\033[0m Technitium login empty."; return 0; }
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+      die "Technitium login failed."
+    fi
 
-  STATUS="$(printf '%s' "$LOGIN_JSON" | jq -r '.status' 2>/dev/null || echo "error")"
-  [ "$STATUS" = "ok" ] || { out "\033[33m[WARN]\033[0m Technitium login failed."; return 0; }
+    local REASON=""
+    REASON="$(printf '%s' "$LOGIN_JSON" | jq -r '.errorMessage // .message // empty' 2>/dev/null || true)"
+    if [ -n "$REASON" ]; then
+      out "\033[33m[WARN]\033[0m Technitium login failed (try ${try}/${max_tries}): $REASON"
+    else
+      out "\033[33m[WARN]\033[0m Technitium login failed (try ${try}/${max_tries})."
+    fi
 
-  TOKEN="$(printf '%s' "$LOGIN_JSON" | jq -r '.token' 2>/dev/null || echo "")"
-  [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { out "\033[33m[WARN]\033[0m Technitium token missing."; return 0; }
+    if [ "$try" -ge "$max_tries" ]; then
+      if prompt_yn_loop "Skip Technitium config for now and continue install? (y/N): " "N"; then
+        out "\033[33m[WARN]\033[0m Skipped Technitium config. Run later: $SCRIPT_CMD_NAME --configure"
+        return 0
+      fi
+      try=1
+    else
+      try=$((try + 1))
+    fi
 
-  SET_JSON=""
-  SET_JSON="$(curl -kfsSL --max-time 12 -X POST \
+    if [ -t 0 ]; then
+      local INPUT_USER2=""
+      read -r -p "Technitium username (default: ${TECH_USER}): " INPUT_USER2
+      [ -n "$INPUT_USER2" ] && TECH_USER="$INPUT_USER2"
+
+      local NEWPASS=""
+      read -r -s -p "Technitium password (hidden, required): " NEWPASS
+      echo ""
+      [ -n "$NEWPASS" ] && TECH_PASS="$NEWPASS"
+
+      local NEWTOTP=""
+      read -r -p "TOTP (2FA) code if enabled (optional): " NEWTOTP
+      TOTP="$NEWTOTP"
+    fi
+  done
+
+  local SET_JSON=""
+  SET_JSON="$(curl -fsSL $TECH_TLS_FLAGS --max-time 12 -X POST \
     --data-urlencode "token=$TOKEN" \
     --data-urlencode "webServiceEnableTls=true" \
     --data-urlencode "webServiceUseSelfSignedTlsCertificate=false" \
@@ -1049,22 +1414,22 @@ configure_technitium_optional_install() {
     --data-urlencode "webServiceTlsCertificatePassword@${PFX_PASS_FILE}" \
     "${TECH_BASE_URL}/api/settings/set" 2>/dev/null || true)"
 
-  if [ -n "$SET_JSON" ]; then
-    SET_STATUS="$(printf '%s' "$SET_JSON" | jq -r '.status' 2>/dev/null || echo "error")"
-    if [ "$SET_STATUS" = "ok" ]; then
-      out "\033[32m[OK]\033[0m Technitium TLS settings applied."
-    else
-      out "\033[33m[WARN]\033[0m Technitium settings/set failed."
-    fi
-  else
-    out "\033[33m[WARN]\033[0m Technitium settings/set empty."
-  fi
+  [ -n "$SET_JSON" ] || die "Technitium settings/set failed (empty response)."
 
-  curl -kfsSL --max-time 6 --get --data-urlencode "token=$TOKEN" "${TECH_BASE_URL}/api/user/logout" >/dev/null 2>&1 || true
+  local SET_STATUS=""
+  SET_STATUS="$(printf '%s' "$SET_JSON" | jq -r '.status' 2>/dev/null || echo "error")"
+  [ "$SET_STATUS" = "ok" ] || die "Technitium settings/set failed."
+
+  out "\033[32m[OK]\033[0m Technitium TLS settings applied."
+  out "\033[33m[INFO]\033[0m On renew, PFX is updated on disk. If Technitium does not reload it automatically, you may need to restart it manually."
+
+  curl -fsSL $TECH_TLS_FLAGS --max-time 6 --get \
+      --data-urlencode "token=$TOKEN" \
+      "${TECH_BASE_URL}/api/user/logout" >/dev/null 2>&1 || true
 }
 
 apply_permissions() {
-  out "\033[36m[STAGE 7/11]\033[0m Setting permissions (root + group '${CERT_GROUP}')..."
+  out "\033[36m[STAGE]\033[0m Setting permissions (root + group '${CERT_GROUP}')..."
 
   getent group "$CERT_GROUP" >/dev/null 2>&1 || groupadd "$CERT_GROUP" >/dev/null 2>&1 || true
 
@@ -1076,8 +1441,10 @@ apply_permissions() {
     usermod -aG "$CERT_GROUP" "pihole" >/dev/null 2>&1 || true
   fi
 
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-    id -u "$SUDO_USER" >/dev/null 2>&1 && usermod -aG "$CERT_GROUP" "$SUDO_USER" >/dev/null 2>&1 || true
+  if [ "$ADD_SUDO_USER_TO_CERT_GROUP" -eq 1 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+      id -u "$SUDO_USER" >/dev/null 2>&1 && usermod -aG "$CERT_GROUP" "$SUDO_USER" >/dev/null 2>&1 || true
+    fi
   fi
 
   chown -R root:root "$SSL_DIR" >/dev/null 2>&1 || true
@@ -1141,12 +1508,14 @@ install_cron_job() {
 
   (crontab -l 2>/dev/null | grep -Fqx "$line") && return 0
   { crontab -l 2>/dev/null; echo "$line"; } | crontab -
-  touch "$CRON_LOG_PATH" >/dev/null 2>&1 || true
-  chmod 644 "$CRON_LOG_PATH" >/dev/null 2>&1 || true
+
+  if ! has_logger; then
+    install_logrotate_for_cron_log
+  fi
 }
 
 enable_autorenew_menu_install() {
-  out "\033[36m[STAGE 10/11]\033[0m Auto renew"
+  out "\033[36m[STAGE]\033[0m Auto renew"
 
   if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
     if has_systemctl; then
@@ -1159,7 +1528,11 @@ enable_autorenew_menu_install() {
 
     AUTORENEW_METHOD="cron"
     install_cron_job
-    out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00)."
+    if has_logger; then
+      out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> syslog."
+    else
+      out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> $CRON_LOG_PATH (logrotate enabled)."
+    fi
     return 0
   fi
 
@@ -1167,12 +1540,6 @@ enable_autorenew_menu_install() {
   echo "Your server certificate expires every 40 days."
   echo "Auto renew keeps HTTPS stable."
   echo ""
-
-  if [ "$TECH_PRESENT" -eq 1 ]; then
-    echo "Technitium detected: recommended to restart it after renew."
-    echo ""
-  fi
-
   echo "Choose auto renew method:"
   echo "1) systemd timer (recommended)"
   echo "2) cron (fallback)"
@@ -1193,15 +1560,6 @@ enable_autorenew_menu_install() {
     pause_step
   fi
 
-  if [ "$TECH_PRESENT" -eq 1 ] && [ "$RSEL" != "3" ]; then
-    if prompt_yn_loop "Restart Technitium after cert renew? (Y/n): " "Y"; then
-      TECH_RESTART_ON_RENEW=1
-    else
-      TECH_RESTART_ON_RENEW=0
-    fi
-    pause_step
-  fi
-
   if [ "$RSEL" = "1" ] && ! has_systemctl; then
     out "\033[33m[WARN]\033[0m systemctl not found. Falling back to cron."
     RSEL="2"
@@ -1216,21 +1574,29 @@ enable_autorenew_menu_install() {
       out "\033[33m[WARN]\033[0m systemd timer failed. Falling back to cron."
       AUTORENEW_METHOD="cron"
       install_cron_job
-      out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00)."
+      if has_logger; then
+        out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> syslog."
+      else
+        out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> $CRON_LOG_PATH (logrotate enabled)."
+      fi
     fi
   elif [ "$RSEL" = "2" ]; then
     AUTORENEW_METHOD="cron"
     out "\033[34m[INFO]\033[0m Installing cron job..."
     install_cron_job
-    out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00)."
+    if has_logger; then
+      out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> syslog."
+    else
+      out "\033[32m[OK]\033[0m Enabled cron job (daily at 03:00) -> $CRON_LOG_PATH (logrotate enabled)."
+    fi
   else
     AUTORENEW_METHOD="none"
     out "\033[33m[INFO]\033[0m Auto renew not enabled."
   fi
 }
 
-final_export_install() {
-  out "\033[36m[STAGE 11/11]\033[0m Root CA export and install guide..."
+final_output_install() {
+  out "\033[36m[STAGE]\033[0m Root CA + install guide + PEM output..."
 
   echo ""
   echo "Files in: $SSL_DIR"
@@ -1238,15 +1604,39 @@ final_export_install() {
   echo "  - Server PEM (cert+key):  $SERVER_PEM"
   echo "  - Server cert:            $SERVER_CRT"
   echo "  - Server key:             $SERVER_KEY"
-  [ -f "$SERVER_PFX" ] && echo "  - Server PFX:             $SERVER_PFX"
+  echo "  - Server PFX:             $SERVER_PFX"
+  echo "  - PFX password file:      $PFX_PASS_FILE"
+  echo "  - Print PFX password:     $SCRIPT_CMD_NAME --print-pfx-pass"
   echo ""
 
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
-    out "\033[34m[INFO]\033[0m To print Root CA PEM: $SCRIPT_CMD_NAME --print-ca"
-    return 0
-  fi
+  printf '%b\n' "\033[36m==================== Device install guide ====================\033[0m"
+  printf '%b\n' "\033[90mGoal:\033[0m Install \033[1mrootCA.crt\033[0m as a \033[1mTrusted Root CA\033[0m on your devices."
+  echo ""
 
-  pause_step
+  printf '%b\n' "\033[1m\033[34m[Windows]\033[0m"
+  printf '%b\n' "  Win + R -> mmc"
+  printf '%b\n' "  Add Certificates snap-in -> Computer account"
+  printf '%b\n' "  Import rootCA.crt into Trusted Root Certification Authorities"
+  echo ""
+
+  printf '%b\n' "\033[1m\033[35m[macOS]\033[0m"
+  printf '%b\n' "  Keychain Access -> System keychain"
+  printf '%b\n' "  Import rootCA.crt and set Trust to Always Trust"
+  echo ""
+
+  printf '%b\n' "\033[1m\033[36m[iOS / iPadOS]\033[0m"
+  printf '%b\n' "  Install profile, then enable Full Trust in Certificate Trust Settings"
+  echo ""
+
+  printf '%b\n' "\033[1m\033[32m[Android]\033[0m"
+  printf '%b\n' "  Settings -> Security -> Encryption & credentials -> Install CA certificate"
+  printf '%b\n' "  Note: some apps ignore user-installed CAs."
+  echo ""
+
+  printf '%b\n' "\033[1m\033[37m[Linux]\033[0m"
+  printf '%b\n' "  Debian/Ubuntu: copy to /usr/local/share/ca-certificates/ then run: sudo update-ca-certificates"
+  printf '%b\n' "\033[36m==============================================================\033[0m"
+  echo ""
 
   out "\033[34m[INFO]\033[0m Root CA SHA-256 fingerprint:"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -1255,55 +1645,12 @@ final_export_install() {
     openssl x509 -in "$CA_CRT" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' || true
   fi
   pause_step
-
-  out "\033[34m[INFO]\033[0m Root CA file:"
-  echo "$CA_CRT"
-  pause_step
-
-  out "\033[34m[INFO]\033[0m To print PEM:"
-  echo "$SCRIPT_CMD_NAME --print-ca"
-  pause_step
-}
-
-final_device_guide_install() {
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ] || [ ! -t 0 ]; then
-    return 0
-  fi
-
-  if ! prompt_yn_loop "Show device install guide? (y/N): " "N"; then
-    return 0
-  fi
-
   echo ""
-  echo -e "\033[36m==================== Device install guide ====================\033[0m"
-  echo -e "\033[90mGoal:\033[0m Install \033[1mrootCA.crt\033[0m as a \033[1mTrusted Root CA\033[0m on your devices."
+  printf '%b\n' "\033[36m==================== rootCA.crt (copy/paste) ====================\033[0m"
+  [ -f "$CA_CRT" ] || die "Root CA not found: $CA_CRT"
+  cat "$CA_CRT"
+  printf '%b\n' "\033[36m=================================================================\033[0m"
   echo ""
-
-  echo -e "\033[1m\033[34m[Windows]\033[0m"
-  echo -e "  Win + R -> mmc"
-  echo -e "  Add Certificates snap-in -> Computer account"
-  echo -e "  Import rootCA.crt into Trusted Root Certification Authorities"
-  echo ""
-
-  echo -e "\033[1m\033[35m[macOS]\033[0m"
-  echo -e "  Keychain Access -> System keychain"
-  echo -e "  Import rootCA.crt and set Trust to Always Trust"
-  echo ""
-
-  echo -e "\033[1m\033[36m[iOS / iPadOS]\033[0m"
-  echo -e "  Install profile, then enable Full Trust in Certificate Trust Settings"
-  echo ""
-
-  echo -e "\033[1m\033[32m[Android]\033[0m"
-  echo -e "  Settings -> Security -> Encryption & credentials -> Install CA certificate"
-  echo -e "  Note: some apps ignore user-installed CAs."
-  echo ""
-
-  echo -e "\033[1m\033[37m[Linux]\033[0m"
-  echo -e "  Debian/Ubuntu: copy to /usr/local/share/ca-certificates/ then run: sudo update-ca-certificates"
-  echo ""
-
-  echo -e "\033[36m==============================================================\033[0m"
   pause_step
 }
 
@@ -1338,8 +1685,8 @@ status() {
     echo "- Last run at: $(read_state_value last_run_at)"
     echo "- Applied targets: $(read_state_value applied_targets)"
     echo "- Auto renew method: $(read_state_value autorenew_method)"
-    echo "- Technitium restart on renew: $(read_state_value tech_restart_on_renew)"
     echo "- Cert renewed last run: $(read_state_value cert_renewed)"
+    echo "- Server enddate (UTC): $(read_state_value server_enddate_utc)"
   else
     echo "- State file: missing ($STATE_FILE)"
   fi
@@ -1350,6 +1697,14 @@ print_ca() {
   require_installed
   [ -f "$CA_CRT" ] || die "Root CA not found: $CA_CRT"
   cat "$CA_CRT"
+  exit 0
+}
+
+print_pfx_pass() {
+  require_installed
+  require_root
+  [ -f "$PFX_PASS_FILE" ] && [ -s "$PFX_PASS_FILE" ] || die "PFX password file missing/empty: $PFX_PASS_FILE"
+  cat "$PFX_PASS_FILE"
   exit 0
 }
 
@@ -1382,6 +1737,7 @@ uninstall() {
   echo "- systemd units: local-https-renew.service and local-https-renew.timer (if installed)"
   echo "- cron entry (if installed)"
   echo "- $CRON_LOG_PATH (if present)"
+  echo "- $LOGROTATE_PATH (if present)"
   echo "- $STATE_DIR (marker + state)"
   echo "- Lighttpd block markers (# BEGIN local-https) (if present)"
   echo ""
@@ -1413,6 +1769,7 @@ uninstall() {
 
   remove_cron_entry
   rm -f "$CRON_LOG_PATH" >/dev/null 2>&1 || true
+  rm -f "$LOGROTATE_PATH" >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR" >/dev/null 2>&1 || true
 
   local lt="/etc/lighttpd/lighttpd.conf"
@@ -1455,54 +1812,21 @@ check_only() {
 renew_flow() {
   NONINTERACTIVE=1
   BOOTSTRAP=0
+  VERBOSE=0
 
   require_installed
   require_root
   ensure_runtime_deps
-
-  if [ "$TECH_RESTART_CLI_SET" -eq 0 ]; then
-    local v=""
-    v="$(read_state_value tech_restart_on_renew)"
-    if [ "$v" = "0" ]; then
-      TECH_RESTART_ON_RENEW=0
-    elif [ "$v" = "1" ]; then
-      TECH_RESTART_ON_RENEW=1
-    fi
-  fi
 
   [ -f "$CA_CRT" ] && [ -f "$CA_KEY" ] || die "Root CA missing. Run: $SCRIPT_CMD_NAME --install"
 
   PIHOLE_PRESENT=0
   command -v pihole >/dev/null 2>&1 && PIHOLE_PRESENT=1
 
-  TECH_PRESENT=0
-  TECH_BASE_URL=""
-  if command -v curl >/dev/null 2>&1; then
-    if curl -k -sS -o /dev/null --max-time 2 "https://127.0.0.1:53443/" 2>/dev/null; then
-      TECH_PRESENT=1
-      TECH_BASE_URL="https://127.0.0.1:53443"
-    elif curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:5380/" 2>/dev/null; then
-      TECH_PRESENT=1
-      TECH_BASE_URL="http://127.0.0.1:5380"
-    fi
-  fi
-
   HOSTNAME="$(hostname 2>/dev/null || true)"
   [ -n "$HOSTNAME" ] || HOSTNAME="localhost"
 
-  ALL_IPS="$(hostname -I 2>/dev/null || true)"
-  ALL_IPS="$(printf '%s' "$ALL_IPS" | tr -s ' ' | sed 's/[[:space:]]*$//' || true)"
-
-  FILTERED_IPS=""
-  for IP in $ALL_IPS; do
-    case "$IP" in
-      *%*) continue ;;
-      *:*) FILTERED_IPS="$FILTERED_IPS $IP" ;;
-      *.*.*.*) FILTERED_IPS="$FILTERED_IPS $IP" ;;
-      *) continue ;;
-    esac
-  done
-  FILTERED_IPS="$(echo "$FILTERED_IPS" | xargs || true)"
+  collect_san_ips_from_hostname_i
 
   TAILSCALE_DNS=""
   TAILSCALE_SHORT=""
@@ -1524,17 +1848,65 @@ renew_flow() {
   issue_or_renew_server_cert
 
   if [ "$CERT_RENEWED" -eq 0 ] && [ "$FORCE_RENEW" -eq 0 ]; then
+    out "\033[32m[OK]\033[0m No renewal needed. Skipping PFX/deploy."
     write_state
     exit 0
   fi
 
+  create_or_update_pfx
+
   apply_permissions
-  maybe_update_pfx_on_renew || true
   apply_pihole_tls_renew_noninteractive
-  restart_technitium_after_renew_if_needed
   write_state
 
   echo "[OK] Renew completed."
+  exit 0
+}
+
+rotate_pfx_flow() {
+  require_installed
+  require_root
+  ensure_runtime_deps
+
+  BOOTSTRAP=0
+
+  banner
+  confirm_start
+  pause_step
+
+  detect_pihole_and_technitium
+  read_host_identity
+  prepare_dir
+
+  if [ "$TECH_PRESENT" -eq 1 ] && [ "$NONINTERACTIVE" -eq 1 ]; then
+    if [ -z "${LOCAL_HTTPS_TECH_PASS:-}" ]; then
+      if [ -z "${LOCAL_HTTPS_TECH_PASS_FILE:-}" ] || [ ! -f "${LOCAL_HTTPS_TECH_PASS_FILE:-}" ]; then
+        die "Technitium detected. For noninteractive rotate, set LOCAL_HTTPS_TECH_PASS or LOCAL_HTTPS_TECH_PASS_FILE."
+      fi
+    fi
+  fi
+
+  [ -f "$CA_CRT" ] && [ -f "$CA_KEY" ] || die "Root CA missing. Run: $SCRIPT_CMD_NAME --install"
+  [ -f "$SERVER_CRT" ] && [ -f "$SERVER_KEY" ] || FORCE_RENEW=1
+  issue_or_renew_server_cert
+
+  out "\033[36m[STAGE]\033[0m Rotating PFX password..."
+  rotate_pfx_password_file
+
+  out "\033[36m[STAGE]\033[0m Rebuilding PFX with new password..."
+  openssl pkcs12 -export \
+    -out "$SERVER_PFX" \
+    -inkey "$SERVER_KEY" \
+    -in "$SERVER_CRT" \
+    -certfile "$CA_CRT" \
+    -passout file:"$PFX_PASS_FILE" >/dev/null 2>&1 || die "Failed to create PFX: $SERVER_PFX"
+
+  apply_permissions
+  configure_technitium_required_install
+
+  print_star_hint
+  write_state
+  out "\033[32m[OK]\033[0m PFX password rotation completed."
   exit 0
 }
 
@@ -1556,13 +1928,14 @@ configure_flow() {
   [ -f "$CA_CRT" ] && [ -f "$CA_KEY" ] || create_or_reuse_ca
   [ -f "$SERVER_CRT" ] || FORCE_RENEW=1
   issue_or_renew_server_cert
+  create_or_update_pfx
 
   apply_permissions
   apply_pihole_tls_install
-  configure_technitium_optional_install
-  final_export_install
-  final_device_guide_install
+  configure_technitium_required_install
+  final_output_install
 
+  print_star_hint
   write_state
   out "\033[32m[OK]\033[0m Configure completed."
 }
@@ -1606,12 +1979,13 @@ install_flow() {
   prepare_dir
   create_or_reuse_ca
   issue_or_renew_server_cert
+  create_or_update_pfx
   apply_permissions
-  apply_pihole_tls_install
-  configure_technitium_optional_install
   enable_autorenew_menu_install
-  final_export_install
-  final_device_guide_install
+  apply_pihole_tls_install
+  configure_technitium_required_install
+  final_output_install
+  print_star_hint
 
   write_state
   out "\033[32m[OK]\033[0m Done."
@@ -1635,13 +2009,15 @@ parse_cli() {
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --force-renew) FORCE_RENEW=1 ;;
-          --no-tech-restart) TECH_RESTART_ON_RENEW=0; TECH_RESTART_CLI_SET=1 ;;
-          --tech-restart) TECH_RESTART_ON_RENEW=1; TECH_RESTART_CLI_SET=1 ;;
           *) ;;
         esac
         shift
       done
       renew_flow
+      ;;
+    --rotate-pfx-pass)
+      shift
+      rotate_pfx_flow
       ;;
     --check)
       shift
@@ -1655,6 +2031,10 @@ parse_cli() {
     --print-ca)
       shift
       print_ca
+      ;;
+    --print-pfx-pass)
+      shift
+      print_pfx_pass
       ;;
     --configure)
       shift
