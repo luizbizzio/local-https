@@ -18,6 +18,20 @@ case "$NONINTERACTIVE" in 1|true|TRUE|yes|YES) NONINTERACTIVE=1 ;; *) NONINTERAC
 case "$VERBOSE" in 1|true|TRUE|yes|YES) VERBOSE=1 ;; *) VERBOSE=0 ;; esac
 case "$BOOTSTRAP" in 1|true|TRUE|yes|YES) BOOTSTRAP=1 ;; *) BOOTSTRAP=0 ;; esac
 case "$ADD_SUDO_USER_TO_CERT_GROUP" in 1|true|TRUE|yes|YES) ADD_SUDO_USER_TO_CERT_GROUP=1 ;; *) ADD_SUDO_USER_TO_CERT_GROUP=0 ;; esac
+AUTO_PIHOLE="${LOCAL_HTTPS_AUTO_PIHOLE:-}"
+
+case "$AUTO_PIHOLE" in
+  1|true|TRUE|yes|YES) AUTO_PIHOLE=1 ;;
+  0|false|FALSE|no|NO) AUTO_PIHOLE=0 ;;
+  "")
+    if [ "$BOOTSTRAP" -eq 1 ]; then
+      AUTO_PIHOLE=1
+    else
+      AUTO_PIHOLE=0
+    fi
+    ;;
+  *) AUTO_PIHOLE=0 ;;
+esac
 
 [ ! -t 0 ] && NONINTERACTIVE=1
 
@@ -279,8 +293,8 @@ print_repo_hint() {
   [ "${LOCAL_HTTPS_SHOW_REPO_HINT:-1}" = "0" ] && return 0
   local repo="https://github.com/luizbizzio/local-https"
   echo ""
-  printf '%b\n' "\033[90mProject home, documentation, and issues:\033[0m $repo"
-  printf '%b\n' "\033[90mStarring the repo helps keep this project maintained.\033[0m"
+  printf '%b\n' "\033[90mDocumentation, source code, and issue tracker:\033[0m $repo"
+  printf '%b\n' "\033[90mIf this tool helped you, consider starring the repository.\033[0m"
 }
 
 write_state() {
@@ -1163,22 +1177,34 @@ apply_pihole_tls_install() {
     return 0
   fi
 
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
-    out "\033[34m[INFO]\033[0m Pi-hole detected. Skipping auto config. Run: $SCRIPT_CMD_NAME --configure"
-    return 0
-  fi
-
   local stack=""
-  stack="$(detect_pihole_stack)"
   local preferred=""
+  local do_apply=0
+
+  stack="$(detect_pihole_stack)"
   preferred="$(choose_preferred_dns)"
 
   out "\033[34m[INFO]\033[0m Pi-hole: stack=$stack host=$preferred"
   vout "\033[34m[INFO]\033[0m Certificate file: $SERVER_PEM"
 
-  if ! prompt_yn_loop "Apply HTTPS to Pi-hole now? (y/N): " "N"; then
-    out "\033[33m[INFO]\033[0m Skipping Pi-hole deploy."
-    return 0
+  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+    do_apply="$AUTO_PIHOLE"
+    if [ "$do_apply" -ne 1 ]; then
+      out "\033[34m[INFO]\033[0m Pi-hole detected. Skipping auto config. Run: $SCRIPT_CMD_NAME --configure"
+      return 0
+    fi
+    out "\033[34m[INFO]\033[0m Applying HTTPS to Pi-hole automatically..."
+  else
+    if prompt_yn_loop "Apply HTTPS to Pi-hole now? (y/N): " "N"; then
+      do_apply=1
+    else
+      do_apply=0
+    fi
+
+    if [ "$do_apply" -ne 1 ]; then
+      out "\033[33m[INFO]\033[0m Skipping Pi-hole deploy."
+      return 0
+    fi
   fi
 
   if [ "$stack" = "lighttpd" ]; then
