@@ -3,7 +3,7 @@ set -euo pipefail
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-STEP_DELAY="${STEP_DELAY:-0.7}"
+STEP_DELAY="${STEP_DELAY:-0.6}"
 
 NONINTERACTIVE="${LOCAL_HTTPS_NONINTERACTIVE:-0}"
 VERBOSE="${LOCAL_HTTPS_VERBOSE:-0}"
