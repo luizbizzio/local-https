@@ -177,10 +177,18 @@ svc_restart_cmd_hint() {
 restart_or_warn() {
   local name="$1"
   local label="$2"
+
+  if [ "$name" = "pihole-FTL" ] || [ "$label" = "Pi-hole FTL" ]; then
+    out "\033[34m[i]\033[0m Restarting Pi-hole FTL (can take up to 90s)..."
+  else
+    out "\033[34m[i]\033[0m Restarting ${label}..."
+  fi
+
   if svc_restart "$name"; then
     out "\033[32m[✓]\033[0m ${label} restarted."
     return 0
   fi
+
   out "\033[31m[✗]\033[0m Failed to restart ${label}. Run: $(svc_restart_cmd_hint "$name")"
   return 1
 }
