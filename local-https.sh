@@ -823,21 +823,22 @@ DNS.1 = $HOSTNAME
 EOF
 
   local DNS_INDEX=2
-  if [ "$PIHOLE_PRESENT" -eq 1 ]; then
+  
+  if [ "$HOSTNAME" != "pi.hole" ]; then
     echo "DNS.${DNS_INDEX} = pi.hole" >> server-openssl.cnf
     DNS_INDEX=$((DNS_INDEX + 1))
   fi
-
-  if [ -n "$TAILSCALE_DNS" ] && [ "$TAILSCALE_DNS" != "null" ]; then
+  
+  if [ -n "$TAILSCALE_DNS" ] && [ "$TAILSCALE_DNS" != "null" ] && [ "$TAILSCALE_DNS" != "pi.hole" ] && [ "$TAILSCALE_DNS" != "$HOSTNAME" ]; then
     echo "DNS.${DNS_INDEX} = $TAILSCALE_DNS" >> server-openssl.cnf
     DNS_INDEX=$((DNS_INDEX + 1))
   fi
-
-  if [ -n "$TAILSCALE_SHORT" ] && [ "$TAILSCALE_SHORT" != "$HOSTNAME" ]; then
+  
+  if [ -n "$TAILSCALE_SHORT" ] && [ "$TAILSCALE_SHORT" != "null" ] && [ "$TAILSCALE_SHORT" != "$HOSTNAME" ] && [ "$TAILSCALE_SHORT" != "pi" ] && [ "$TAILSCALE_SHORT" != "pihole" ]; then
     echo "DNS.${DNS_INDEX} = $TAILSCALE_SHORT" >> server-openssl.cnf
     DNS_INDEX=$((DNS_INDEX + 1))
   fi
-
+  
   local IP_INDEX=1
   local IP=""
   for IP in $FILTERED_IPS; do
