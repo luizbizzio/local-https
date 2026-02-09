@@ -1,0 +1,48 @@
+name: Update install.sh SHA256
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "local-https.sh"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-install-sha
+  cancel-in-progress: true
+
+jobs:
+  update-sha:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          HASH="$(sha256sum local-https.sh | awk '{print $1}')"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Update install.sh
+        run: |
+          HASH="${{ steps.sha.outputs.hash }}"
+          perl -i -pe 's/^EXPECTED_SHA256_DEFAULT="[^"]*"/EXPECTED_SHA256_DEFAULT="'"$HASH"'"/' install.sh
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- install.sh; then
+            echo "No changes to install.sh"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add install.sh
+          git commit -m "chore(install): update expected sha256 [skip ci]"
+          git push
