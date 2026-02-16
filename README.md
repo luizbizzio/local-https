@@ -193,4 +193,4 @@ https://www.ssl.com/article/preparing-for-47-day-ssl-tls-certificates/
 
 ## 📄 License
 
-This repository is licensed under the [MIT License](./LICENSE)
+This repository is licensed under the [Mozilla Public License Version 2.0](./LICENSE)
