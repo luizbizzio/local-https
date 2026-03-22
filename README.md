@@ -1,4 +1,4 @@
-<h1 align="center">Local HTTPS</h1>
+<h1 align="center">Local HTTPS 🔒</h1>
 <h4 align="center">(Previously pihole-https)</h4>
 <p align="center">
 Local Root CA and auto-renewed HTTPS certificates for private networks and services<br>
