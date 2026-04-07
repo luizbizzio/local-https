@@ -1492,6 +1492,11 @@ configure_technitium_required_install() {
 apply_permissions() {
   out "\033[36m[>]\033[0m Setting permissions (root + group '${CERT_GROUP}')..."
 
+  local existing_members=""
+  if getent group "$CERT_GROUP" >/dev/null 2>&1; then
+    existing_members="$(getent group "$CERT_GROUP" | cut -d: -f4 | tr ',' ' ')"
+  fi
+
   getent group "$CERT_GROUP" >/dev/null 2>&1 || groupadd "$CERT_GROUP" >/dev/null 2>&1 || true
 
   if id -u www-data >/dev/null 2>&1; then
@@ -1507,6 +1512,12 @@ apply_permissions() {
       id -u "$SUDO_USER" >/dev/null 2>&1 && usermod -aG "$CERT_GROUP" "$SUDO_USER" >/dev/null 2>&1 || true
     fi
   fi
+
+  local member=""
+  for member in $existing_members; do
+    [ -n "$member" ] || continue
+    id -u "$member" >/dev/null 2>&1 && usermod -aG "$CERT_GROUP" "$member" >/dev/null 2>&1 || true
+  done
 
   chown -R root:root "$SSL_DIR" >/dev/null 2>&1 || true
   chgrp -R "$CERT_GROUP" "$SSL_DIR" >/dev/null 2>&1 || true
