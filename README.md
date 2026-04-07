@@ -112,6 +112,18 @@ sudo systemd-run --unit=local-https-renew-force --service-type=oneshot   /usr/lo
 
 -----
 
+### ⚙️ Other services (Grafana, Nginx, etc.)
+
+Any service that needs to read the certificate files can be granted access by adding its user to the `certs` group:
+````bash
+sudo usermod -aG certs grafana
+sudo usermod -aG certs nginx
+````
+
+Group membership is preserved across renewals, once added, the service will continue to have access after every certificate rotation without any manual intervention.
+
+-----
+
 ## 📦 Files created
 
 Default folder:
