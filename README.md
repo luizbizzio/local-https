@@ -188,6 +188,7 @@ https://www.ssl.com/article/preparing-for-47-day-ssl-tls-certificates/
 - 🔧 Pi-hole Lighttpd mode may install `lighttpd-mod-openssl` via `apt-get`.
 - 🐳 Not intended for container-based TLS termination or Docker ingress setups.
 - 🧷 The PFX password is stored in a root-only file. Treat it as a secret.
+- 🔄 The `certs` group membership is preserved on every renew, any user or service manually added to the group (e.g. `grafana`, `nginx`) will automatically retain access after certificate rotation.
 
 -----
 
