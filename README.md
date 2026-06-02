@@ -28,6 +28,12 @@ That installs the command to:
 
 Then it runs the setup flow (`local-https --install`) and offers auto-renew (systemd timer recommended).
 
+During the interactive install you are asked for a **domain name** to add to the certificate (default `pi.hole`). Pick whatever your network uses (e.g. `home.lan`, `dns.home`). To set it non-interactively, pass it as an environment variable:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install.sh | sudo LOCAL_HTTPS_DOMAIN=home.lan bash
+```
+
 -----
 
 ## ✨ What it does
@@ -36,7 +42,7 @@ Then it runs the setup flow (`local-https --install`) and offers auto-renew (sys
 - 🪪 Issues a **server certificate** (default: **40 days**) with SANs for:
   - hostname
   - relevant LAN IPs (filtered)
-  - `pi.hole` when Pi-hole is detected
+  - a configurable **domain name** (default `pi.hole`)
   - Tailscale DNS name when available
 - 📦 Generates:
   - `server.pem` (cert + key, for services like Pi-hole)
@@ -60,6 +66,31 @@ Then it runs the setup flow (`local-https --install`) and offers auto-renew (sys
 | `sudo local-https --print-pfx-pass` | Prints the PFX password (stored in a root-only file) |
 | `sudo local-https --rotate-pfx-pass` | Rotates PFX password, rebuilds PFX, updates Technitium TLS settings |
 | `sudo local-https --uninstall [--yes] [--purge-certs]` | Removes installed files and optionally deletes generated certs |
+
+-----
+
+## 🌐 Custom domain
+
+The certificate includes a friendly domain name (default `pi.hole`). If your network uses a different local domain, you can configure it. The chosen domain is added to the certificate SANs and is remembered across renewals (stored in the state file).
+
+The domain is resolved with the following precedence (highest first):
+
+1. **Environment variable** – `LOCAL_HTTPS_DOMAIN`:
+   ```bash
+   sudo LOCAL_HTTPS_DOMAIN=home.lan local-https --install
+   ```
+2. **CLI flag** – `--domain` (works with `--install`, `--configure`, and `--renew`):
+   ```bash
+   sudo local-https --install --domain home.lan
+   sudo local-https --configure --domain dns.home
+   ```
+3. **Persisted state** – whatever was chosen on the previous run (so renewals stay consistent).
+4. **Pi-hole auto-detection** – on a fresh install, if Pi-hole is detected the script reads its configured `webserver.domain` (via `pihole-FTL --config`, falling back to `/etc/pihole/pihole.toml`) and uses that as the default.
+5. **Default** – `pi.hole`.
+
+During an interactive `--install`/`--configure` you are also prompted, pre-filled with the resolved value (press Enter to keep it).
+
+To change the domain on an existing install, run `sudo local-https --configure --domain <name>` (or `sudo local-https --renew --force-renew --domain <name>`). The Root CA stays the same, so there is nothing new to trust on your devices.
 
 -----
 
