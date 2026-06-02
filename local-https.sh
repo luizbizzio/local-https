@@ -55,7 +55,7 @@ SCRIPT_SOURCE_URL="${LOCAL_HTTPS_SOURCE_URL:-$SCRIPT_SOURCE_URL_DEFAULT}"
 # Friendly domain name added to the certificate SANs (and used as the preferred
 # URL when Pi-hole is present). Configurable so it does not have to be "pi.hole".
 # Precedence at runtime:
-#   LOCAL_HTTPS_DOMAIN env > --domain CLI > persisted state > Pi-hole webserver.domain > default.
+#   --domain CLI > LOCAL_HTTPS_DOMAIN env > persisted state > Pi-hole webserver.domain > default.
 DOMAIN_DEFAULT="pi.hole"
 DOMAIN=""
 DOMAIN_CLI=""
@@ -151,13 +151,37 @@ read_state_value() {
 
 sanitize_domain() {
   local d="${1:-}"
-  d="$(printf '%s' "$d" | tr -d '[:space:]' | tr 'A-Z' 'a-z')"
-  d="${d#.}"
+  d="$(printf '%s' "$d" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')"
   d="${d%.}"
+
+  [ -n "$d" ] || { printf '%s' ""; return 0; }
+  [ "${#d}" -le 253 ] || { printf '%s' ""; return 0; }
+
   case "$d" in
-    ""|*[!a-z0-9.-]*) printf '%s' ""; return 0 ;;
+    *[!a-z0-9.-]*|.*|*..*|*-) printf '%s' ""; return 0 ;;
   esac
+
+  if [[ "$d" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  local label=""
+  local labels=()
+  IFS='.' read -r -a labels <<< "$d"
+  for label in "${labels[@]}"; do
+    [ -n "$label" ] || { printf '%s' ""; return 0; }
+    [ "${#label}" -le 63 ] || { printf '%s' ""; return 0; }
+    case "$label" in
+      -*|*-|*[!a-z0-9-]*) printf '%s' ""; return 0 ;;
+    esac
+  done
+
   printf '%s' "$d"
+}
+
+domain_error() {
+  die "Invalid domain: $1. Use a DNS name like pi.hole, home.lan, or dns.home. Labels must start and end with a letter or digit."
 }
 
 detect_pihole_domain() {
@@ -187,21 +211,30 @@ detect_pihole_domain() {
 
 resolve_domain() {
   local d=""
+  local clean=""
   DOMAIN_FROM_PIHOLE=0
-  if [ -n "${LOCAL_HTTPS_DOMAIN:-}" ]; then
-    d="$LOCAL_HTTPS_DOMAIN"
-  elif [ -n "${DOMAIN_CLI:-}" ]; then
-    d="$DOMAIN_CLI"
+
+  if [ -n "${DOMAIN_CLI:-}" ]; then
+    clean="$(sanitize_domain "$DOMAIN_CLI")"
+    [ -n "$clean" ] || domain_error "$DOMAIN_CLI"
+    d="$clean"
+  elif [ -n "${LOCAL_HTTPS_DOMAIN:-}" ]; then
+    clean="$(sanitize_domain "$LOCAL_HTTPS_DOMAIN")"
+    [ -n "$clean" ] || domain_error "$LOCAL_HTTPS_DOMAIN"
+    d="$clean"
   else
     d="$(read_state_value domain)"
+    clean="$(sanitize_domain "$d")"
+    d="$clean"
     if [ -z "$d" ] && [ "${PIHOLE_PRESENT:-0}" -eq 1 ]; then
-      d="$(sanitize_domain "$(detect_pihole_domain)")"
-      if [ -n "$d" ]; then
+      clean="$(sanitize_domain "$(detect_pihole_domain)")"
+      if [ -n "$clean" ]; then
+        d="$clean"
         DOMAIN_FROM_PIHOLE=1
       fi
     fi
   fi
-  d="$(sanitize_domain "$d")"
+
   [ -n "$d" ] || d="$DOMAIN_DEFAULT"
   DOMAIN="$d"
 }
@@ -589,7 +622,7 @@ print_help() {
   echo "  - If already installed, --install will not run again."
   echo "  - Reinstall only via: --uninstall then --install"
   echo "  - --domain sets the friendly name added to the certificate (default: $DOMAIN_DEFAULT)."
-  echo "    It is remembered across renewals. You can also set LOCAL_HTTPS_DOMAIN."
+  echo "    It overrides LOCAL_HTTPS_DOMAIN and is remembered across renewals."
   echo "    If Pi-hole is detected and no domain is set, its webserver.domain is used."
   echo ""
 }
@@ -2204,8 +2237,18 @@ parse_cli() {
       shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --domain) DOMAIN_CLI="${2:-}"; shift 2 || shift; continue ;;
-          --domain=*) DOMAIN_CLI="${1#*=}" ;;
+          --domain)
+            [ "$#" -ge 2 ] || die "Missing value for --domain. Use: --domain <name>"
+            [ -n "${2:-}" ] || die "Missing value for --domain. Use: --domain <name>"
+            case "$2" in --*) die "Missing value for --domain. Use: --domain <name>" ;; esac
+            DOMAIN_CLI="$2"
+            shift 2
+            continue
+            ;;
+          --domain=*)
+            DOMAIN_CLI="${1#*=}"
+            [ -n "$DOMAIN_CLI" ] || die "Missing value for --domain. Use: --domain <name>"
+            ;;
           *) ;;
         esac
         shift
@@ -2218,8 +2261,18 @@ parse_cli() {
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --force-renew) FORCE_RENEW=1 ;;
-          --domain) DOMAIN_CLI="${2:-}"; shift 2 || shift; continue ;;
-          --domain=*) DOMAIN_CLI="${1#*=}" ;;
+          --domain)
+            [ "$#" -ge 2 ] || die "Missing value for --domain. Use: --domain <name>"
+            [ -n "${2:-}" ] || die "Missing value for --domain. Use: --domain <name>"
+            case "$2" in --*) die "Missing value for --domain. Use: --domain <name>" ;; esac
+            DOMAIN_CLI="$2"
+            shift 2
+            continue
+            ;;
+          --domain=*)
+            DOMAIN_CLI="${1#*=}"
+            [ -n "$DOMAIN_CLI" ] || die "Missing value for --domain. Use: --domain <name>"
+            ;;
           *) ;;
         esac
         shift
@@ -2251,8 +2304,18 @@ parse_cli() {
       shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --domain) DOMAIN_CLI="${2:-}"; shift 2 || shift; continue ;;
-          --domain=*) DOMAIN_CLI="${1#*=}" ;;
+          --domain)
+            [ "$#" -ge 2 ] || die "Missing value for --domain. Use: --domain <name>"
+            [ -n "${2:-}" ] || die "Missing value for --domain. Use: --domain <name>"
+            case "$2" in --*) die "Missing value for --domain. Use: --domain <name>" ;; esac
+            DOMAIN_CLI="$2"
+            shift 2
+            continue
+            ;;
+          --domain=*)
+            DOMAIN_CLI="${1#*=}"
+            [ -n "$DOMAIN_CLI" ] || die "Missing value for --domain. Use: --domain <name>"
+            ;;
           *) ;;
         esac
         shift
