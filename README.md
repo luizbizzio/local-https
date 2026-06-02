@@ -75,14 +75,15 @@ The certificate includes a friendly domain name (default `pi.hole`). If your net
 
 The domain is resolved with the following precedence (highest first):
 
-1. **Environment variable** – `LOCAL_HTTPS_DOMAIN`:
-   ```bash
-   sudo LOCAL_HTTPS_DOMAIN=home.lan local-https --install
-   ```
-2. **CLI flag** – `--domain` (works with `--install`, `--configure`, and `--renew`):
+1. **CLI flag** – `--domain` (works with `--install`, `--configure`, and `--renew`):
    ```bash
    sudo local-https --install --domain home.lan
    sudo local-https --configure --domain dns.home
+   sudo local-https --renew --force-renew --domain home.lan
+   ```
+2. **Environment variable** – `LOCAL_HTTPS_DOMAIN`:
+   ```bash
+   sudo LOCAL_HTTPS_DOMAIN=home.lan local-https --install
    ```
 3. **Persisted state** – whatever was chosen on the previous run (so renewals stay consistent).
 4. **Pi-hole auto-detection** – on a fresh install, if Pi-hole is detected the script reads its configured `webserver.domain` (via `pihole-FTL --config`, falling back to `/etc/pihole/pihole.toml`) and uses that as the default.
