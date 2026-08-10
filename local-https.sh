@@ -87,6 +87,7 @@ PIHOLE_PRESENT=0
 TECH_PRESENT=0
 TECH_BASE_URL=""
 TECH_SERVICE=""
+TECH_CERT_ACCESS_CHANGED=0
 
 FILTERED_IPS=""
 TAILSCALE_DNS=""
@@ -500,10 +501,10 @@ detect_technitium_service_name() {
   has_systemctl || return 0
 
   local candidates=(
+    dns.service
     technitium-dns.service
     technitiumdns.service
     TechnitiumDnsServer.service
-    dns.service
   )
 
   local svc=""
@@ -525,6 +526,33 @@ detect_technitium_service_name() {
   if [ -n "$fallback" ]; then
     TECH_SERVICE="$fallback"
   fi
+}
+
+technitium_service_user() {
+  [ -n "${TECH_SERVICE:-}" ] || return 0
+  has_systemctl || return 0
+
+  local user=""
+  user="$(systemctl show -p User --value "$TECH_SERVICE" 2>/dev/null || true)"
+
+  # systemd defaults to root when User= is not set. This is the common
+  # behavior for Technitium installations created before v15.
+  [ -n "$user" ] || user="root"
+  printf '%s' "$user"
+}
+
+wait_for_technitium() {
+  local i=0
+
+  for ((i=0; i<30; i++)); do
+    technitium_detect_base_url
+    if [ "$TECH_PRESENT" -eq 1 ]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
 }
 
 build_renew_args() {
@@ -1506,6 +1534,18 @@ configure_technitium_required_install() {
   need_cmd curl || die "Technitium detected but curl missing."
   need_cmd jq || die "Technitium detected but jq missing."
 
+  if [ "${TECH_CERT_ACCESS_CHANGED:-0}" -eq 1 ]; then
+    if [ -n "${TECH_SERVICE:-}" ]; then
+      out "\033[34m[i]\033[0m Activating Technitium certificate access..."
+      restart_or_warn "$TECH_SERVICE" "Technitium DNS" || die "Technitium restart failed after certificate permission update."
+      wait_for_technitium || die "Technitium did not become reachable after restart."
+      TECH_CERT_ACCESS_CHANGED=0
+      out "\033[32m[✓]\033[0m Technitium certificate access is active."
+    else
+      die "Technitium service user permissions changed, but service name was not detected."
+    fi
+  fi
+
   TECH_TLS_FLAGS=()
   read -r -a TECH_TLS_FLAGS < <(tech_curl_tls_flags || true) || true
 
@@ -1603,7 +1643,7 @@ configure_technitium_required_install() {
   done
 
   local SET_JSON=""
-  SET_JSON="$(curl -fsSL "${TECH_TLS_FLAGS[@]}" --max-time 12 -X POST \
+  SET_JSON="$(curl -sSL "${TECH_TLS_FLAGS[@]}" --max-time 12 -X POST \
     --data-urlencode "token=$TOKEN" \
     --data-urlencode "webServiceEnableTls=true" \
     --data-urlencode "webServiceUseSelfSignedTlsCertificate=false" \
@@ -1615,7 +1655,14 @@ configure_technitium_required_install() {
 
   local SET_STATUS=""
   SET_STATUS="$(printf '%s' "$SET_JSON" | jq -r '.status' 2>/dev/null || echo "error")"
-  [ "$SET_STATUS" = "ok" ] || die "Technitium settings/set failed."
+  if [ "$SET_STATUS" != "ok" ]; then
+    local SET_REASON=""
+    SET_REASON="$(printf '%s' "$SET_JSON" | jq -r '.errorMessage // .innerErrorMessage // .message // empty' 2>/dev/null || true)"
+    if [ -n "$SET_REASON" ]; then
+      die "Technitium settings/set failed: $SET_REASON"
+    fi
+    die "Technitium settings/set failed."
+  fi
 
   out "\033[32m[✓]\033[0m Technitium TLS settings applied."
   out "\033[34m[i]\033[0m On renew, local-https updates: $SERVER_PFX"
@@ -1634,6 +1681,39 @@ apply_permissions() {
   fi
 
   getent group "$CERT_GROUP" >/dev/null 2>&1 || groupadd "$CERT_GROUP" >/dev/null 2>&1 || true
+
+  TECH_CERT_ACCESS_CHANGED=0
+  local tech_user=""
+  tech_user="$(technitium_service_user)"
+
+  if [ -n "$tech_user" ] && [ "$tech_user" != "root" ] && id -u "$tech_user" >/dev/null 2>&1; then
+    if ! id -nG "$tech_user" 2>/dev/null | tr ' ' '\n' | grep -qx "$CERT_GROUP"; then
+      usermod -aG "$CERT_GROUP" "$tech_user" >/dev/null 2>&1 || \
+        die "Failed to add Technitium user '$tech_user' to group '$CERT_GROUP'."
+      TECH_CERT_ACCESS_CHANGED=1
+      out "\033[32m[✓]\033[0m Added Technitium user '$tech_user' to group '$CERT_GROUP'."
+    elif [ -n "${TECH_SERVICE:-}" ] && has_systemctl; then
+      # The account may already be in certs while the running process still has
+      # its old supplementary groups (for example after an interrupted install).
+      local cert_gid=""
+      local tech_pid=""
+      cert_gid="$(getent group "$CERT_GROUP" 2>/dev/null | cut -d: -f3 || true)"
+      tech_pid="$(systemctl show -p MainPID --value "$TECH_SERVICE" 2>/dev/null || true)"
+
+      if [ -n "$cert_gid" ] && [ -n "$tech_pid" ] && [ "$tech_pid" != "0" ] && [ -r "/proc/$tech_pid/status" ]; then
+        if ! awk -v gid="$cert_gid" '
+          /^Groups:/ {
+            for (i=2; i<=NF; i++) {
+              if ($i == gid) found=1
+            }
+          }
+          END { exit(found ? 0 : 1) }
+        ' "/proc/$tech_pid/status"; then
+          TECH_CERT_ACCESS_CHANGED=1
+        fi
+      fi
+    fi
+  fi
 
   if id -u www-data >/dev/null 2>&1; then
     usermod -aG "$CERT_GROUP" "www-data" >/dev/null 2>&1 || true
