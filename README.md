@@ -136,6 +136,8 @@ sudo systemd-run --unit=local-https-renew-force --service-type=oneshot   /usr/lo
 
 - If Technitium is detected, the script can configure Technitium Web UI TLS to use:
   - `server.pfx` + the stored password
+- Supports both legacy Technitium Linux installations running as root and newer non-root installations.
+- For non-root installations, the Technitium service user is automatically granted access to the `certs` group when required.
 - On renew (when a new cert is created), it restarts the Technitium service so the new cert is loaded.
 
 ### 🟪 Tailscale
