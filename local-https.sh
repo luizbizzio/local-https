@@ -541,6 +541,65 @@ technitium_service_user() {
   printf '%s' "$user"
 }
 
+ensure_technitium_systemd_cert_access() {
+  [ -n "${TECH_SERVICE:-}" ] || return 0
+  has_systemctl || return 0
+
+  local tech_user=""
+  tech_user="$(technitium_service_user)"
+  [ -n "$tech_user" ] || return 0
+  [ "$tech_user" != "root" ] || return 0
+
+  local dropin_dir="/etc/systemd/system/${TECH_SERVICE}.d"
+  local dropin_file="${dropin_dir}/local-https.conf"
+  local tmp=""
+
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
+# Managed by local-https: Technitium certificate access
+[Service]
+ReadOnlyPaths=$SERVER_PFX
+EOF
+
+  if [ -f "$dropin_file" ] && cmp -s "$tmp" "$dropin_file"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  install -d -m 755 "$dropin_dir" >/dev/null 2>&1 || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    die "Failed to create Technitium systemd drop-in directory: $dropin_dir"
+  }
+
+  install -m 644 "$tmp" "$dropin_file" >/dev/null 2>&1 || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    die "Failed to configure Technitium read-only certificate access: $dropin_file"
+  }
+  rm -f "$tmp" >/dev/null 2>&1 || true
+
+  systemctl daemon-reload >/dev/null 2>&1 || die "systemctl daemon-reload failed after Technitium certificate access update."
+
+  TECH_CERT_ACCESS_CHANGED=1
+  out "\033[32m[✓]\033[0m Configured Technitium read-only access to: $SERVER_PFX"
+}
+
+remove_technitium_systemd_cert_access() {
+  has_systemctl || return 0
+
+  detect_technitium_service_name
+  [ -n "${TECH_SERVICE:-}" ] || return 0
+
+  local dropin_dir="/etc/systemd/system/${TECH_SERVICE}.d"
+  local dropin_file="${dropin_dir}/local-https.conf"
+
+  [ -f "$dropin_file" ] || return 0
+  grep -qF "# Managed by local-https: Technitium certificate access" "$dropin_file" 2>/dev/null || return 0
+
+  rm -f "$dropin_file" >/dev/null 2>&1 || true
+  rmdir "$dropin_dir" >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
 wait_for_technitium() {
   local i=0
 
@@ -1537,12 +1596,12 @@ configure_technitium_required_install() {
   if [ "${TECH_CERT_ACCESS_CHANGED:-0}" -eq 1 ]; then
     if [ -n "${TECH_SERVICE:-}" ]; then
       out "\033[34m[i]\033[0m Activating Technitium certificate access..."
-      restart_or_warn "$TECH_SERVICE" "Technitium DNS" || die "Technitium restart failed after certificate permission update."
+      restart_or_warn "$TECH_SERVICE" "Technitium DNS" || die "Technitium restart failed after certificate access update."
       wait_for_technitium || die "Technitium did not become reachable after restart."
       TECH_CERT_ACCESS_CHANGED=0
       out "\033[32m[✓]\033[0m Technitium certificate access is active."
     else
-      die "Technitium service user permissions changed, but service name was not detected."
+      die "Technitium certificate access changed, but service name was not detected."
     fi
   fi
 
@@ -1746,6 +1805,8 @@ apply_permissions() {
   [ -f "$SERVER_PEM" ] && chmod 640 "$SERVER_PEM" >/dev/null 2>&1 || true
   [ -f "$SERVER_PFX" ] && chmod 640 "$SERVER_PFX" >/dev/null 2>&1 || true
   [ -f "$PFX_PASS_FILE" ] && chmod 600 "$PFX_PASS_FILE" >/dev/null 2>&1 || true
+
+  ensure_technitium_systemd_cert_access
 
   out "\033[32m[✓]\033[0m Permissions applied."
 }
@@ -2070,6 +2131,7 @@ uninstall() {
   fi
 
   if [ "$UNINSTALL_PURGE" -eq 1 ]; then
+    remove_technitium_systemd_cert_access
     rm -rf "$SSL_DIR" >/dev/null 2>&1 || true
   fi
 
