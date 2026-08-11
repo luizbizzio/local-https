@@ -56,6 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install
 
 | Command | What it does |
 |---|---|
+| `local-https --version` | Prints the installed `local-https` version |
 | `sudo local-https --install` | Full setup (Root CA, server cert, PEM/PFX, permissions, auto-renew, optional Pi-hole deploy, Technitium TLS if detected) |
 | `sudo local-https --renew` | Renew if needed (near expiry window). If nothing to do, exits fast |
 | `sudo local-https --renew --force-renew` | Forces a new server certificate + rebuilds PFX + restarts detected services |
@@ -236,6 +237,7 @@ https://www.ssl.com/article/preparing-for-47-day-ssl-tls-certificates/
 
 ## 📝 Notes
 
+- 🏷️ When reporting an issue, include the output of `local-https --version`.
 - 🧱 This is a **local CA**. It is for your own network and devices, not public HTTPS.
 - 🧪 If you are testing renew: use `sudo local-https --renew --force-renew` and confirm the new `notAfter` date with OpenSSL.
 - 🔧 Pi-hole Lighttpd mode may install `lighttpd-mod-openssl` via `apt-get`.

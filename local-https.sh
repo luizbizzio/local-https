@@ -47,6 +47,7 @@ vout() { [ "$VERBOSE" -eq 1 ] && out "$1" || true; }
 die() { printf '%b\n' "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
 
 SCRIPT_CMD_NAME="local-https"
+VERSION="1.1.2"
 INSTALL_PATH="/usr/local/sbin/local-https"
 
 SCRIPT_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/luizbizzio/local-https/main/local-https.sh"
@@ -694,6 +695,7 @@ remove_block() {
 print_help() {
   echo ""
   echo "Usage:"
+  echo "  $SCRIPT_CMD_NAME --version"
   echo "  $SCRIPT_CMD_NAME --install [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --renew [--force-renew] [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --check"
@@ -727,7 +729,7 @@ banner() {
   esac
 
   printf '%b\n' "\033[36m============================================================\033[0m"
-  printf '%b\n' "\033[1m\033[36m local-https\033[0m \033[90m(${mode})\033[0m"
+  printf '%b\n' "\033[1m\033[36m local-https v${VERSION}\033[0m \033[90m(${mode})\033[0m"
   printf '%b\n' "\033[36m============================================================\033[0m"
   echo ""
 
@@ -2373,6 +2375,10 @@ parse_cli() {
   case "$1" in
     --help|-h)
       print_help
+      exit 0
+      ;;
+    --version|-V)
+      printf '%s\n' "$SCRIPT_CMD_NAME $VERSION"
       exit 0
       ;;
     --install)
