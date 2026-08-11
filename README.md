@@ -138,6 +138,7 @@ sudo systemd-run --unit=local-https-renew-force --service-type=oneshot   /usr/lo
   - `server.pfx` + the stored password
 - Supports both legacy Technitium Linux installations running as root and newer non-root installations.
 - For non-root installations, the Technitium service user is automatically granted access to the `certs` group when required.
+- If the Technitium systemd service restricts filesystem access, `local-https` automatically creates a systemd drop-in granting read-only access to `server.pfx`.
 - On renew (when a new cert is created), it restarts the Technitium service so the new cert is loaded.
 
 ### 🟪 Tailscale
@@ -156,6 +157,8 @@ sudo usermod -aG certs nginx
 
 Group membership is preserved across renewals, once added, the service will continue to have access after every certificate rotation without any manual intervention.
 
+Some hardened systemd services may also restrict filesystem access and require an explicit `ReadOnlyPaths=` rule for certificate files.
+
 -----
 
 ## 📦 Files created
@@ -173,6 +176,10 @@ Main files:
 State:
 
 - `/var/lib/local-https/state.env`
+
+Technitium systemd integration (non-root installations only):
+
+- `/etc/systemd/system/<technitium-service>.d/local-https.conf`
 
 -----
 
