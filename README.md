@@ -16,23 +16,15 @@ It can automatically deploy certificates and reload supported services:
 
 It is officially supported on Debian-based distributions (Debian, Ubuntu, Raspberry Pi OS, Armbian). Other Linux distributions may work but are not officially supported.
 
-## 🚀 One-Step Automated Install
+## 🚀 One-Step Install / Update
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install.sh | sudo bash
 ```
 
-That installs the command to:
+The installer downloads and verifies the latest `local-https`, then installs it to `/usr/local/sbin/local-https`.
 
-- `/usr/local/sbin/local-https`
-
-Then it runs the setup flow (`local-https --install`) and offers auto-renew (systemd timer recommended).
-
-During the interactive install you are asked for a **domain name** to add to the certificate (default `pi.hole`). Pick whatever your network uses (e.g. `home.lan`, `dns.home`). To set it non-interactively, pass it as an environment variable:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install.sh | sudo LOCAL_HTTPS_DOMAIN=home.lan bash
-```
+On a new installation, or if the initial setup was never completed, it asks whether you want to start the setup. If `local-https` is already configured, running the same command only updates the program and keeps your existing certificates and configuration.
 
 -----
 
@@ -48,6 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install
   - `server.pem` (cert + key, for services like Pi-hole)
   - `server.pfx` (password-protected, for services like Technitium)
 - 🔁 Can enable **automatic renewal** via **systemd timer** (or cron fallback)
+- ⬆️ Can check GitHub for a newer version and update itself with `--update`
 - 🧠 On renewal, it only “deploys/restarts” if a new cert was actually created (unless forced)
 
 -----
@@ -56,17 +49,49 @@ curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install
 
 | Command | What it does |
 |---|---|
-| `local-https --version` | Prints the installed `local-https` version |
+| `local-https --version` / `--v` / `-V` | Prints the installed `local-https` version |
+| `sudo local-https --update` | Checks GitHub for a newer version and asks before updating |
+| `sudo local-https --update --yes` | Updates without asking for confirmation |
 | `sudo local-https --install` | Full setup (Root CA, server cert, PEM/PFX, permissions, auto-renew, optional Pi-hole deploy, Technitium TLS if detected) |
 | `sudo local-https --renew` | Renew if needed (near expiry window). If nothing to do, exits fast |
 | `sudo local-https --renew --force-renew` | Forces a new server certificate + rebuilds PFX + restarts detected services |
-| `sudo local-https --status` | Shows current status and last run info |
+| `sudo local-https --status` | Shows the installed version, current status, and last run info |
 | `sudo local-https --check` | Exit code indicates if renewal is needed |
 | `sudo local-https --configure` | Re-run deploy steps for Pi-hole / Technitium without reinstalling everything |
 | `sudo local-https --print-ca` | Prints `rootCA.crt` (useful to copy to devices) |
 | `sudo local-https --print-pfx-pass` | Prints the PFX password (stored in a root-only file) |
 | `sudo local-https --rotate-pfx-pass` | Rotates PFX password, rebuilds PFX, updates Technitium TLS settings |
 | `sudo local-https --uninstall [--yes] [--purge-certs]` | Removes installed files and optionally deletes generated certs |
+
+### ⬆️ Updating later
+
+Once installed, you can check for a newer version without using the full `curl` command again:
+
+```bash
+sudo local-https --update
+```
+
+If a newer version is available, `local-https` shows the current and latest versions and asks before installing it. The update only replaces the program itself; your existing Root CA, certificates, state, and service configuration are kept.
+
+For non-interactive updates:
+
+```bash
+sudo local-https --update --yes
+```
+
+-----
+
+## ⚙️ Reconfigure services
+
+Use `--configure` when you want to re-detect and reapply supported service integrations without reinstalling `local-https`.
+
+```bash
+sudo local-https --configure
+```
+
+This re-checks Pi-hole and Technitium, reapplies certificate permissions and TLS deployment, and keeps your existing Root CA and installation.
+
+This is useful after installing or changing Pi-hole or Technitium, or when you want to run the integration setup again.
 
 -----
 
@@ -138,7 +163,7 @@ sudo systemd-run --unit=local-https-renew-force --service-type=oneshot   /usr/lo
 - If Technitium is detected, the script can configure Technitium Web UI TLS to use:
   - `server.pfx` + the stored password
 - Supports both legacy Technitium Linux installations running as root and newer non-root installations.
-- For non-root installations, the Technitium service user is automatically granted access to the `certs` group when required.
+- If the Technitium `dns-server` account exists, it is automatically granted access to the `certs` group. Custom non-root Technitium service users are supported as well.
 - If the Technitium systemd service restricts filesystem access, `local-https` automatically creates a systemd drop-in granting read-only access to `server.pfx`.
 - On renew (when a new cert is created), it restarts the Technitium service so the new cert is loaded.
 

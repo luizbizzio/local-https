@@ -53,6 +53,9 @@ INSTALL_PATH="/usr/local/sbin/local-https"
 SCRIPT_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/luizbizzio/local-https/main/local-https.sh"
 SCRIPT_SOURCE_URL="${LOCAL_HTTPS_SOURCE_URL:-$SCRIPT_SOURCE_URL_DEFAULT}"
 
+INSTALLER_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/luizbizzio/local-https/main/install.sh"
+INSTALLER_SOURCE_URL="${LOCAL_HTTPS_INSTALLER_URL:-$INSTALLER_SOURCE_URL_DEFAULT}"
+
 # Friendly domain name added to the certificate SANs (and used as the preferred
 # URL when Pi-hole is present). Configurable so it does not have to be "pi.hole".
 # Precedence at runtime:
@@ -109,6 +112,7 @@ CERT_RENEWED=0
 FORCE_RENEW=0
 UNINSTALL_YES=0
 UNINSTALL_PURGE=0
+UPDATE_YES=0
 
 has_systemctl() { command -v systemctl >/dev/null 2>&1; }
 has_service_cmd() { command -v service >/dev/null 2>&1; }
@@ -704,6 +708,7 @@ print_help() {
   echo ""
   echo "Usage:"
   echo "  $SCRIPT_CMD_NAME --version | --v | -V"
+  echo "  $SCRIPT_CMD_NAME --update [--yes]"
   echo "  $SCRIPT_CMD_NAME --install [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --renew [--force-renew] [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --check"
@@ -716,6 +721,7 @@ print_help() {
   echo ""
   echo "Notes:"
   echo "  - Running without args shows this help."
+  echo "  - --update checks GitHub for a newer version and asks before installing it."
   echo "  - If already installed, --install will not run again."
   echo "  - Reinstall only via: --uninstall then --install"
   echo "  - --domain sets the friendly name added to the certificate (default: $DOMAIN_DEFAULT)."
@@ -817,6 +823,126 @@ install_deps_interactive() {
 ensure_runtime_deps() {
   need_cmd openssl || die "Missing dependency: openssl. Run --install first."
   need_cmd hostname || die "Missing dependency: hostname."
+}
+
+version_is_newer() {
+  local candidate="$1"
+  local current="$2"
+
+  [[ "$candidate" =~ ^[0-9]+(\.[0-9]+){2}$ ]] || return 1
+  [[ "$current" =~ ^[0-9]+(\.[0-9]+){2}$ ]] || return 1
+
+  local c_major c_minor c_patch
+  local v_major v_minor v_patch
+
+  IFS='.' read -r c_major c_minor c_patch <<< "$candidate"
+  IFS='.' read -r v_major v_minor v_patch <<< "$current"
+
+  if (( 10#$c_major > 10#$v_major )); then return 0; fi
+  if (( 10#$c_major < 10#$v_major )); then return 1; fi
+
+  if (( 10#$c_minor > 10#$v_minor )); then return 0; fi
+  if (( 10#$c_minor < 10#$v_minor )); then return 1; fi
+
+  (( 10#$c_patch > 10#$v_patch ))
+}
+
+extract_version_from_script() {
+  local f="$1"
+  awk -F'"' '/^[[:space:]]*VERSION="[0-9]+\.[0-9]+\.[0-9]+"/ { print $2; exit }' "$f" 2>/dev/null || true
+}
+
+update_flow() {
+  require_root
+  need_cmd curl || die "Missing dependency: curl."
+  need_cmd awk || die "Missing dependency: awk."
+  need_cmd mktemp || die "Missing dependency: mktemp."
+  need_cmd bash || die "Missing dependency: bash."
+  need_cmd grep || die "Missing dependency: grep."
+  need_cmd head || die "Missing dependency: head."
+
+  local remote_script=""
+  local installer_tmp=""
+  local remote_version=""
+
+  remote_script="$(mktemp -p /tmp local-https.update-check.XXXXXX)"
+  installer_tmp="$(mktemp -p /tmp local-https.update-installer.XXXXXX)"
+  chmod 700 "$remote_script" "$installer_tmp" >/dev/null 2>&1 || true
+
+  local cleanup_cmd=""
+  printf -v cleanup_cmd 'rm -f %q %q >/dev/null 2>&1 || true' "$remote_script" "$installer_tmp"
+  trap "$cleanup_cmd" EXIT
+
+  out "\033[36m[>]\033[0m Checking for updates..."
+
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --connect-timeout 10 \
+    --max-time 60 \
+    -o "$remote_script" \
+    "$SCRIPT_SOURCE_URL" || die "Failed to check for updates."
+
+  [ -s "$remote_script" ] || die "Downloaded update metadata is empty."
+  remote_version="$(extract_version_from_script "$remote_script")"
+  [ -n "$remote_version" ] || die "Could not determine the latest local-https version."
+
+  if [ "$remote_version" = "$VERSION" ]; then
+    out "\033[32m[✓]\033[0m local-https $VERSION is already the latest version."
+    return 0
+  fi
+
+  if ! version_is_newer "$remote_version" "$VERSION"; then
+    out "\033[33m[!]\033[0m Installed version $VERSION is newer than repository version $remote_version."
+    out "\033[34m[i]\033[0m No update was performed."
+    return 0
+  fi
+
+  echo ""
+  out "\033[34m[i]\033[0m Current version: $VERSION"
+  out "\033[34m[i]\033[0m Latest version:  $remote_version"
+  echo ""
+
+  if [ "$UPDATE_YES" -ne 1 ]; then
+    if [ "$NONINTERACTIVE" -eq 1 ] || [ ! -t 0 ]; then
+      out "\033[34m[i]\033[0m Update available. Run: sudo $SCRIPT_CMD_NAME --update --yes"
+      return 0
+    fi
+
+    if ! prompt_yn_loop "Update local-https to v${remote_version}? (Y/n): " "Y"; then
+      out "\033[34m[i]\033[0m Update cancelled."
+      return 0
+    fi
+  fi
+
+  out "\033[36m[>]\033[0m Downloading installer..."
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --connect-timeout 10 \
+    --max-time 60 \
+    -o "$installer_tmp" \
+    "$INSTALLER_SOURCE_URL" || die "Failed to download install.sh."
+
+  [ -s "$installer_tmp" ] || die "Downloaded install.sh is empty."
+  head -n 1 "$installer_tmp" | grep -Eq '^#!' || die "Downloaded install.sh is invalid."
+  grep -qF 'EXPECTED_SHA256_DEFAULT=' "$installer_tmp" || die "Downloaded install.sh does not look like the local-https installer."
+  bash -n "$installer_tmp" >/dev/null 2>&1 || die "Downloaded install.sh failed syntax validation."
+
+  echo ""
+  out "\033[36m[>]\033[0m Updating local-https v${VERSION} -> v${remote_version}..."
+
+  if env \
+    LOCAL_HTTPS_UPDATE_ONLY=1 \
+    LOCAL_HTTPS_NONINTERACTIVE=1 \
+    bash "$installer_tmp"; then
+    local installed_version=""
+    installed_version="$("$INSTALL_PATH" --version 2>/dev/null | awk '{ print $NF; exit }' || true)"
+    [ "$installed_version" = "$remote_version" ] || \
+      die "Update completed, but installed version is '${installed_version:-unknown}' instead of '$remote_version'."
+
+    echo ""
+    out "\033[32m[✓]\033[0m Update completed."
+    "$INSTALL_PATH" --version 2>/dev/null || true
+  else
+    die "Update failed."
+  fi
 }
 
 install_self() {
@@ -2034,6 +2160,7 @@ status() {
   echo ""
 
   echo "[Install]"
+  echo "- Version: $VERSION"
   if [ -f "$INSTALL_MARKER" ] || [ -f "$INSTALL_PATH" ]; then
     echo "- Installed: yes"
     [ -f "$INSTALL_MARKER" ] && echo "- Marker: $INSTALL_MARKER"
@@ -2350,6 +2477,7 @@ install_flow() {
       [ -f "$STATE_FILE" ] && echo "- State: $STATE_FILE"
       echo ""
       echo "Use:"
+      echo "  $SCRIPT_CMD_NAME --update"
       echo "  $SCRIPT_CMD_NAME --renew"
       echo "  $SCRIPT_CMD_NAME --status"
       echo "  $SCRIPT_CMD_NAME --configure"
@@ -2402,6 +2530,18 @@ parse_cli() {
       ;;
     --version|--v|-V)
       printf '%s\n' "$SCRIPT_CMD_NAME $VERSION"
+      exit 0
+      ;;
+    --update)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --yes) UPDATE_YES=1 ;;
+          *) die "Unknown option for --update: $1" ;;
+        esac
+        shift
+      done
+      update_flow
       exit 0
       ;;
     --install)
