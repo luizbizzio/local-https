@@ -510,22 +510,30 @@ detect_technitium_service_name() {
 
   local svc=""
   for svc in "${candidates[@]}"; do
-    systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$svc" || continue
+    local load_state=""
     local exec=""
+
+    load_state="$(systemctl show -p LoadState --value "$svc" 2>/dev/null || true)"
+    [ "$load_state" = "loaded" ] || continue
+
     exec="$(systemctl show -p ExecStart --value "$svc" 2>/dev/null || true)"
     printf '%s' "$exec" | grep -Eqi 'technitium|TechnitiumDnsServer|dnsserver' || continue
+
     TECH_SERVICE="$svc"
     return 0
   done
 
+  local unit_files=""
   local fallback=""
-  fallback="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
-    | awk '{print $1}' \
-    | grep -Ei '^technitium.*\.service$' \
-    | head -n1 || true)"
+  unit_files="$(systemctl list-unit-files --type=service --no-legend 2>/dev/null || true)"
+  fallback="$(awk 'tolower($1) ~ /^technitium.*\.service$/ { print $1; exit }' <<< "$unit_files")"
 
   if [ -n "$fallback" ]; then
-    TECH_SERVICE="$fallback"
+    local fallback_exec=""
+    fallback_exec="$(systemctl show -p ExecStart --value "$fallback" 2>/dev/null || true)"
+    if printf '%s' "$fallback_exec" | grep -Eqi 'technitium|TechnitiumDnsServer|dnsserver'; then
+      TECH_SERVICE="$fallback"
+    fi
   fi
 }
 
@@ -695,7 +703,7 @@ remove_block() {
 print_help() {
   echo ""
   echo "Usage:"
-  echo "  $SCRIPT_CMD_NAME --version"
+  echo "  $SCRIPT_CMD_NAME --version | --v | -V"
   echo "  $SCRIPT_CMD_NAME --install [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --renew [--force-renew] [--domain <name>]"
   echo "  $SCRIPT_CMD_NAME --check"
@@ -1745,33 +1753,48 @@ apply_permissions() {
 
   TECH_CERT_ACCESS_CHANGED=0
   local tech_user=""
-  tech_user="$(technitium_service_user)"
 
-  if [ -n "$tech_user" ] && [ "$tech_user" != "root" ] && id -u "$tech_user" >/dev/null 2>&1; then
+  # Technitium v15+ uses dns-server by default. If Technitium is reachable and
+  # that account exists, always keep it in certs. This also covers hybrid or
+  # upgraded installations whose systemd unit may still run as root.
+  if [ "${TECH_PRESENT:-0}" -eq 1 ] && id -u dns-server >/dev/null 2>&1; then
+    if ! id -nG dns-server 2>/dev/null | tr ' ' '\n' | grep -qx "$CERT_GROUP"; then
+      usermod -aG "$CERT_GROUP" dns-server >/dev/null 2>&1 || \
+        die "Failed to add Technitium user 'dns-server' to group '$CERT_GROUP'."
+      TECH_CERT_ACCESS_CHANGED=1
+      out "\033[32m[✓]\033[0m Added Technitium user 'dns-server' to group '$CERT_GROUP'."
+    fi
+  fi
+
+  # Also support custom non-root service users.
+  tech_user="$(technitium_service_user)"
+  if [ -n "$tech_user" ] && [ "$tech_user" != "root" ] && [ "$tech_user" != "dns-server" ] && id -u "$tech_user" >/dev/null 2>&1; then
     if ! id -nG "$tech_user" 2>/dev/null | tr ' ' '\n' | grep -qx "$CERT_GROUP"; then
       usermod -aG "$CERT_GROUP" "$tech_user" >/dev/null 2>&1 || \
         die "Failed to add Technitium user '$tech_user' to group '$CERT_GROUP'."
       TECH_CERT_ACCESS_CHANGED=1
       out "\033[32m[✓]\033[0m Added Technitium user '$tech_user' to group '$CERT_GROUP'."
-    elif [ -n "${TECH_SERVICE:-}" ] && has_systemctl; then
-      # The account may already be in certs while the running process still has
-      # its old supplementary groups (for example after an interrupted install).
-      local cert_gid=""
-      local tech_pid=""
-      cert_gid="$(getent group "$CERT_GROUP" 2>/dev/null | cut -d: -f3 || true)"
-      tech_pid="$(systemctl show -p MainPID --value "$TECH_SERVICE" 2>/dev/null || true)"
+    fi
+  fi
 
-      if [ -n "$cert_gid" ] && [ -n "$tech_pid" ] && [ "$tech_pid" != "0" ] && [ -r "/proc/$tech_pid/status" ]; then
-        if ! awk -v gid="$cert_gid" '
-          /^Groups:/ {
-            for (i=2; i<=NF; i++) {
-              if ($i == gid) found=1
-            }
+  # The service account may already be in certs while the running process still
+  # has its old supplementary groups.
+  if [ -n "$tech_user" ] && [ "$tech_user" != "root" ] && [ -n "${TECH_SERVICE:-}" ] && has_systemctl; then
+    local cert_gid=""
+    local tech_pid=""
+    cert_gid="$(getent group "$CERT_GROUP" 2>/dev/null | cut -d: -f3 || true)"
+    tech_pid="$(systemctl show -p MainPID --value "$TECH_SERVICE" 2>/dev/null || true)"
+
+    if [ -n "$cert_gid" ] && [ -n "$tech_pid" ] && [ "$tech_pid" != "0" ] && [ -r "/proc/$tech_pid/status" ]; then
+      if ! awk -v gid="$cert_gid" '
+        /^Groups:/ {
+          for (i=2; i<=NF; i++) {
+            if ($i == gid) found=1
           }
-          END { exit(found ? 0 : 1) }
-        ' "/proc/$tech_pid/status"; then
-          TECH_CERT_ACCESS_CHANGED=1
-        fi
+        }
+        END { exit(found ? 0 : 1) }
+      ' "/proc/$tech_pid/status"; then
+        TECH_CERT_ACCESS_CHANGED=1
       fi
     fi
   fi
@@ -2377,7 +2400,7 @@ parse_cli() {
       print_help
       exit 0
       ;;
-    --version|-V)
+    --version|--v|-V)
       printf '%s\n' "$SCRIPT_CMD_NAME $VERSION"
       exit 0
       ;;
