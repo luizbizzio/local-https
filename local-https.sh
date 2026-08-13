@@ -1560,7 +1560,7 @@ apply_pihole_tls_install() {
   out "\033[34m[i]\033[0m Pi-hole: stack=$stack host=$preferred"
   vout "\033[34m[i]\033[0m Certificate file: $SERVER_PEM"
 
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
     do_apply="$AUTO_PIHOLE"
     if [ "$do_apply" -ne 1 ]; then
       out "\033[34m[i]\033[0m Pi-hole detected. Skipping auto config. Run: $SCRIPT_CMD_NAME --configure"
@@ -2017,7 +2017,7 @@ install_cron_job() {
 enable_autorenew_menu_install() {
   out "\033[36m[>]\033[0m Auto renew"
 
-  if [ "$BOOTSTRAP" -eq 1 ] || [ "$NONINTERACTIVE" -eq 1 ]; then
+  if [ "$NONINTERACTIVE" -eq 1 ]; then
     if has_systemctl; then
       AUTORENEW_METHOD="systemd"
       if install_systemd_timer; then
