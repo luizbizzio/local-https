@@ -1,20 +1,33 @@
-<h1 align="center">Local HTTPS 🔒</h1>
-<h4 align="center">(Previously pihole-https)</h4>
+<h1 align="center">&emsp;Local HTTPS 🔒</h1><p align="center">
+Formerly <strong>pihole-https</strong>
+</p>
 <p align="center">
-Local Root CA and auto-renewed HTTPS certificates for private networks and services<br>
-with automatic deployment to Pi-hole, Technitium, and Tailscale
+<strong>Automatic local HTTPS certificates for Pi-hole, Technitium DNS, Tailscale and homelabs</strong><br>
+Local Root CA, trusted certificates, automatic renewal and service deployment
 </p>
 
-`local-https` creates a local Root CA and issues a server certificate for your machine, so you can access web UIs over HTTPS without browser warnings (after trusting the Root CA on your devices).
+<p align="center">
+  <img src="https://raw.githubusercontent.com/homarr-labs/dashboard-icons/main/svg/pi-hole.svg" height="58" alt="Pi-hole">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/homarr-labs/dashboard-icons/main/svg/technitium.svg" height="46" alt="Technitium DNS">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="https://cdn.simpleicons.org/tailscale/6B7280/FFFFFF" height="46" alt="Tailscale">
+</p>
 
-It can automatically deploy certificates and reload supported services:
-- ✅ **Pi-hole** (FTL webserver or Lighttpd)
-- ✅ **Technitium DNS** (uses a password-protected `.pfx`)
-- ✅ **Tailscale** (adds your Tailscale DNS name to the certificate SANs)
+---
+
+`local-https` automatically sets up and renews trusted HTTPS certificates for local web interfaces, so you do not have to manually create, deploy or renew certificates.
+
+It creates a local Root CA and automatically configures supported services:
+
+* ✅ **Pi-hole** - FTL webserver on Pi-hole 6+ or Lighttpd on older installations
+* ✅ **Technitium DNS** - automatic deployment of a password-protected `.pfx` certificate
+* ✅ **Tailscale** - automatically adds your Tailscale DNS hostname to the certificate SANs
+* ✅ **Other services** - generated PEM/PFX certificates can be used manually with Nginx, Grafana and more
+
+After trusting the Root CA on your devices, you can access supported local web interfaces over HTTPS without browser certificate warnings.
 
 -----
 
-It is officially supported on Debian-based distributions (Debian, Ubuntu, Raspberry Pi OS, Armbian). Other Linux distributions may work but are not officially supported.
+Officially supported on Debian, Ubuntu, Raspberry Pi OS and Armbian. Other Linux distributions may work but are not officially supported.
 
 ## 🚀 One-Step Install / Update
 
@@ -25,6 +38,12 @@ curl -fsSL https://raw.githubusercontent.com/luizbizzio/local-https/main/install
 The installer downloads and verifies the latest `local-https`, then installs it to `/usr/local/sbin/local-https`.
 
 On a new installation, or if the initial setup was never completed, it asks whether you want to start the setup. If `local-https` is already configured, running the same command only updates the program and keeps your existing certificates and configuration.
+
+> [!IMPORTANT]
+> After installation, trust `rootCA.crt` on your devices to avoid browser certificate warnings.
+
+> [!TIP]
+> Run `sudo local-https --status` at any time to check the installed version, current certificate status and last run information.
 
 -----
 
@@ -183,29 +202,37 @@ sudo usermod -aG certs nginx
 
 Group membership is preserved across renewals, once added, the service will continue to have access after every certificate rotation without any manual intervention.
 
-Some hardened systemd services may also restrict filesystem access and require an explicit `ReadOnlyPaths=` rule for certificate files.
+> [!NOTE]
+> Hardened systemd services may restrict filesystem access and require an explicit `ReadOnlyPaths=` rule for the certificate files.
 
 -----
 
 ## 📦 Files created
 
-Default folder:
+Default certificate directory:
 
-- `/etc/ssl/servercerts`
+```text
+/etc/ssl/servercerts
+```
 
 Main files:
 
-- `rootCA.crt` and `rootCA.key` (local Root CA)
-- `server.crt`, `server.key`, `server.pem`
-- `server.pfx` and `.pfx-pass` (password file)
+- `rootCA.crt`
+- `rootCA.key`
+- `server.crt`
+- `server.key`
+- `server.pem`
+- `server.pfx`
+- `.pfx-pass`
 
 State:
 
-- `/var/lib/local-https/state.env`
+```text
+/var/lib/local-https/state.env
+```
 
-Technitium systemd integration (non-root installations only):
-
-- `/etc/systemd/system/<technitium-service>.d/local-https.conf`
+> [!WARNING]
+> Keep `rootCA.key` private. Anyone with access to this key can issue certificates trusted by your local Root CA.
 
 -----
 
