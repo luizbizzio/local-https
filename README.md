@@ -64,6 +64,14 @@ On a new installation, or if the initial setup was never completed, it asks whet
 
 -----
 
+## 💡 Demo
+
+<p align="center">
+  <img src="local-https-example.png" height="90%"/>
+</p>
+
+-----
+
 ## 🧭 Usage
 
 | Command | What it does |
