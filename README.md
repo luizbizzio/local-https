@@ -67,7 +67,7 @@ On a new installation, or if the initial setup was never completed, it asks whet
 ## 💡 Demo
 
 <p align="center">
-  <img src="local-https-example.png" height="90%"/>
+  <img src="local-https-example.png" alt="Local HTTPS demo" height="90%"/>
 </p>
 
 -----
